@@ -1,4 +1,4 @@
-package com.example.forgeint_phone.data
+package com.example.forgeint.data
 
 import android.content.Context
 import androidx.room.*

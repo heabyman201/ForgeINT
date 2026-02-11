@@ -33,6 +33,10 @@ object RichTextFormatter {
         background = Color.DarkGray.copy(alpha = 0.4f),
         color = Color(0xFF00E5FF)
     )
+    private val BOLD_STYLE = SpanStyle(fontWeight = FontWeight.Bold)
+    private val ITALIC_STYLE = SpanStyle(fontStyle = FontStyle.Italic)
+    private val SUP_STYLE = SpanStyle(baselineShift = BaselineShift.Superscript, fontSize = 10.sp)
+    private val SUB_STYLE = SpanStyle(baselineShift = BaselineShift.Subscript, fontSize = 10.sp)
     private val NUMERATOR_STYLE = SpanStyle(baselineShift = BaselineShift.Superscript, fontSize = 9.sp)
     private val DENOMINATOR_STYLE = SpanStyle(baselineShift = BaselineShift.Subscript, fontSize = 9.sp)
 
@@ -46,16 +50,27 @@ object RichTextFormatter {
     )
 
     @RequiresApi(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
-    fun format(text: String, primaryColor: Color): AnnotatedString {
+    fun format(text: String, primaryColor: Color, fastMode: Boolean = false): AnnotatedString {
         if (text.isEmpty()) return AnnotatedString("")
 
-
-        val processedText = if (text.contains("\\")) {
+        val hasBackslash = text.indexOf('\\') >= 0
+        val processedText = if (!fastMode && hasBackslash) {
             SYMBOL_TOKEN_PATTERN.matcher(text).replaceAll { matchResult ->
                 SYMBOL_MAP[matchResult.group()] ?: matchResult.group()
             }
         } else {
             text
+        }
+
+        val hasCode = processedText.indexOf('`') >= 0
+        val hasBold = processedText.contains("**")
+        val hasItalic = processedText.indexOf('*') >= 0
+        val hasSup = processedText.indexOf('^') >= 0
+        val hasSub = processedText.indexOf('_') >= 0
+        val hasFrac = processedText.indexOf('[') >= 0
+
+        if (!hasCode && !hasBold && !hasItalic && !hasSup && !hasSub && !hasFrac) {
+            return AnnotatedString(processedText, SpanStyle(color = primaryColor))
         }
 
         return buildAnnotatedString {
@@ -65,14 +80,14 @@ object RichTextFormatter {
             addStyle(SpanStyle(color = primaryColor), 0, processedText.length)
 
 
-            if (processedText.contains("`")) applyStyle(CODE_PATTERN, processedText, CODE_STYLE)
-            if (processedText.contains("**")) applyStyle(BOLD_PATTERN, processedText, SpanStyle(fontWeight = FontWeight.Bold))
-            if (processedText.contains("*")) applyStyle(ITALIC_PATTERN, processedText, SpanStyle(fontStyle = FontStyle.Italic))
-            if (processedText.contains("^")) applyMathShift(SUP_PATTERN, processedText, BaselineShift.Superscript)
-            if (processedText.contains("_")) applyMathShift(SUB_PATTERN, processedText, BaselineShift.Subscript)
+            if (hasCode) applyStyle(CODE_PATTERN, processedText, CODE_STYLE)
+            if (hasBold) applyStyle(BOLD_PATTERN, processedText, BOLD_STYLE)
+            if (hasItalic) applyStyle(ITALIC_PATTERN, processedText, ITALIC_STYLE)
+            if (hasSup) applyMathShift(SUP_PATTERN, processedText, SUP_STYLE)
+            if (hasSub) applyMathShift(SUB_PATTERN, processedText, SUB_STYLE)
 
             // Fraction styling
-            if (processedText.contains("[")) applyFractions(processedText)
+            if (hasFrac) applyFractions(processedText)
         }
     }
 
@@ -88,12 +103,12 @@ object RichTextFormatter {
         }
     }
 
-    private fun AnnotatedString.Builder.applyMathShift(pattern: Pattern, text: String, shift: BaselineShift) {
+    private fun AnnotatedString.Builder.applyMathShift(pattern: Pattern, text: String, style: SpanStyle) {
         val matcher = pattern.matcher(text)
         while (matcher.find()) {
             val start = matcher.start(1)
             val end = matcher.end(1)
-            addStyle(SpanStyle(baselineShift = shift, fontSize = 10.sp), start, end)
+            addStyle(style, start, end)
             addStyle(TRANSPARENT_STYLE, matcher.start(), start)
             addStyle(TRANSPARENT_STYLE, end, matcher.end())
         }

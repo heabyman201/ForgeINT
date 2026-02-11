@@ -20,6 +20,7 @@ android {
         targetSdk = 36
         versionCode = 1
         versionName = "1.0"
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         buildConfigField("String", "GEMINI_API_KEY", "\"${project.findProperty("GEMINI_API_KEY")}\"")
         externalNativeBuild {
             cmake {
@@ -91,7 +92,9 @@ dependencies {
     implementation("androidx.compose.material:material-icons-extended:1.6.0")
     implementation("com.google.ai.client.generativeai:generativeai:0.9.0")
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.0")
+    implementation("com.google.guava:guava:31.1-android")
     androidTestImplementation(platform(libs.compose.bom))
+    androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.ui.test.junit4)
     debugImplementation(libs.ui.tooling)
     debugImplementation(libs.ui.test.manifest)

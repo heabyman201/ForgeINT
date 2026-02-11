@@ -1,9 +1,9 @@
-package com.example.forgeint_phone.presentation
+package com.example.forgeint.presentation
 
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
-import com.example.forgeint_phone.data.SettingsManager
+import com.example.forgeint.data.SettingsManager
 import com.google.gson.Gson
 import com.google.gson.annotations.SerializedName
 import kotlinx.coroutines.Dispatchers
@@ -34,13 +34,13 @@ import okhttp3.ResponseBody.Companion.asResponseBody
 import okio.GzipSource
 import okio.buffer
 import java.util.concurrent.TimeUnit
-import com.example.forgeint_phone.data.ChatDatabase
-import com.example.forgeint_phone.data.Conversation
-import com.example.forgeint_phone.data.Message
-import com.example.forgeint_phone.data.UserTrait
-import com.example.forgeint_phone.domain.LocalInferenceEngine
-import com.example.forgeint_phone.domain.Personas
-import com.example.forgeint_phone.data.MemoryPrompter
+import com.example.forgeint.data.ChatDatabase
+import com.example.forgeint.data.Conversation
+import com.example.forgeint.data.Message
+import com.example.forgeint.data.UserTrait
+import com.example.forgeint.domain.LocalInferenceEngine
+import com.example.forgeint.domain.Personas
+import com.example.forgeint.data.MemoryPrompter
 import org.json.JSONObject
 
 enum class LocalModelStatus {
@@ -50,16 +50,31 @@ enum class LocalModelStatus {
 }
 
 class GeminiViewModel(application: Application) : AndroidViewModel(application) {
-    init {
-        System.loadLibrary("forgeint_local")
+    // Removed System.loadLibrary("forgeint_local")
 
+    fun parseStreamChunkNative(rawData: String): String? {
+        if (!rawData.startsWith("data: ") || rawData.contains("[DONE]")) return null
+        
+        val jsonPart = rawData.removePrefix("data: ").trim()
+        if (jsonPart.isBlank()) return null
+        
+        return try {
+            val json = JSONObject(jsonPart)
+            val choices = json.optJSONArray("choices")
+            val choice = choices?.optJSONObject(0)
+            val delta = choice?.optJSONObject("delta")
+            val content = delta?.optString("content") ?: choice?.optJSONObject("message")?.optString("content")
+            
+            content?.replace(Regex("nn\\d+"), "")
+        } catch (e: Exception) {
+            null
+        }
     }
 
-
-    external fun parseStreamChunkNative(rawData: String): String?
     private val dao = ChatDatabase.getDatabase(application).chatDao()
     private val settingsManager = SettingsManager(application)
     private val traitDao = ChatDatabase.getDatabase(application)
+    private val customPersonaRepository = com.example.forgeint.data.CustomPersonaRepository(application)
 
     private val localEngine = LocalInferenceEngine(application)
     private var isModelLoaded = false
@@ -75,6 +90,32 @@ class GeminiViewModel(application: Application) : AndroidViewModel(application) 
 
     private val _availableModels = MutableStateFlow<List<String>>(emptyList())
     val availableModels = _availableModels.asStateFlow()
+
+    private val _customPersonas = MutableStateFlow(customPersonaRepository.getCustomPersonas())
+    
+    val allPersonas = _customPersonas.map { custom ->
+        Personas.list + custom
+    }.stateIn(viewModelScope, SharingStarted.Lazily, Personas.list)
+
+    fun createPersona(name: String, description: String, prompt: String) {
+        val newPersona = com.example.forgeint.domain.Persona(
+            id = java.util.UUID.randomUUID().toString(),
+            name = name,
+            description = description,
+            systemInstruction = prompt
+        )
+        customPersonaRepository.addCustomPersona(newPersona)
+        _customPersonas.value = customPersonaRepository.getCustomPersonas()
+    }
+
+    fun deletePersona(id: String) {
+        customPersonaRepository.deleteCustomPersona(id)
+        _customPersonas.value = customPersonaRepository.getCustomPersonas()
+        // If the deleted persona was selected, revert to default
+        if (selectedPersonaId.value == id) {
+             setPersona("default")
+        }
+    }
 
     fun fetchAvailableModels() {
         viewModelScope.launch(Dispatchers.IO) {
@@ -186,6 +227,7 @@ val memory_monitor = settingsManager.isMemoryMonitorEnabled
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     private val _currentConversationId = MutableStateFlow<Long?>(null)
+    val currentConversationId = _currentConversationId.asStateFlow()
 
     private var _isLoading = MutableStateFlow(false)
     val isLoading = _isLoading.asStateFlow()
@@ -491,6 +533,18 @@ fun toggleMemoryMonitor() {
     private suspend fun extractAndStoreTraits(userText: String) {
         if (userText.length < 10) return
 
+        val explicitMemory = extractExplicitStructuredMemoryInstruction(userText)
+        if (explicitMemory != null) {
+            val (key, value, category) = explicitMemory
+            if (isUsefulStructuredMemory(key, value, category)) {
+                traitDao.traitDao().updateTrait(UserTrait(key, value, category))
+                android.util.Log.d("MemoryDebug", "MEMORY SAVED (explicit): $key - $value")
+            } else {
+                android.util.Log.d("MemoryDebug", "Rejected explicit structured memory: $key|$value|$category")
+            }
+            return
+        }
+
         val modelToUse = currentModelId.value
         val prompt = MemoryPrompter.extractionPrompt + "\n\nUser Message: \"$userText\""
 
@@ -542,6 +596,11 @@ fun toggleMemoryMonitor() {
                         val value = parts[1].trim()
                         val category = parts[2].trim()
 
+                        if (!isUsefulStructuredMemory(key, value, category)) {
+                            android.util.Log.d("MemoryDebug", "Skipping low-quality memory: $key|$value|$category")
+                            return@let
+                        }
+
                         traitDao.traitDao().updateTrait(UserTrait(key, value, category))
                         println("MEMORY SAVED: $key - $value")
                     }
@@ -550,6 +609,67 @@ fun toggleMemoryMonitor() {
         } catch (e: Exception) {
             e.printStackTrace()
         }
+    }
+
+    private fun isUsefulStructuredMemory(key: String, value: String, category: String): Boolean {
+        val normalizedKey = key.trim().uppercase()
+        val normalizedValue = value.trim().lowercase()
+        val normalizedCategory = category.trim().uppercase()
+
+        if (normalizedKey.length !in 3..48) return false
+        if (!Regex("^[A-Z0-9_]+$").matches(normalizedKey)) return false
+        if (normalizedValue.length !in 3..180) return false
+        if (normalizedCategory.isBlank()) return false
+
+        val bannedKeys = setOf("USER", "USER_INFO", "MESSAGE", "FACT", "CONTEXT", "TOPIC")
+        if (normalizedKey in bannedKeys) return false
+
+        val genericNoise = listOf(
+            "user is talking",
+            "user is speaking",
+            "user is discussing",
+            "user asked",
+            "used the word",
+            "used word",
+            "save this to long term",
+            "save it to long term",
+            "something",
+            "anything",
+            "random topic",
+            "conversation"
+        )
+        if (genericNoise.any { normalizedValue.contains(it) }) return false
+
+        if (Regex("\\b(save|remember|store|long term|short term|memory)\\b").containsMatchIn(normalizedValue)) return false
+
+        val meaningfulKeywords = Regex(
+            "\\b(name|called|live|from|work|job|student|study|age|birthday|allergic|prefer|like|dislike|love|hate|use|using|owns|has|currently|today|tomorrow|feeling|mood|working on|building|debugging|learning)\\b"
+        )
+        val hasDigits = normalizedValue.any { it.isDigit() }
+        val enoughWords = normalizedValue.split(" ").size >= 4
+
+        return meaningfulKeywords.containsMatchIn(normalizedValue) || hasDigits || enoughWords
+    }
+
+    private fun extractExplicitStructuredMemoryInstruction(userText: String): Triple<String, String, String>? {
+        val trimmed = userText.trim()
+        if (trimmed.length < 12) return null
+
+        val pattern = Regex(
+            "(?i)\\b(?:save|remember|store)\\b\\s+(.{3,180}?)\\s+(?:as|to|in)\\s+(long\\s*term|short\\s*term)\\b"
+        )
+        val match = pattern.find(trimmed) ?: return null
+        val rawContent = match.groupValues[1]
+            .trim()
+            .removePrefix("that ")
+            .removePrefix("this ")
+            .trim()
+        if (rawContent.equals("it", ignoreCase = true)) return null
+
+        val typePart = match.groupValues[2]
+        val key = if (typePart.contains("long", ignoreCase = true)) "USER_FACT_EXPLICIT" else "USER_CONTEXT_EXPLICIT"
+        val category = if (typePart.contains("long", ignoreCase = true)) "LONG_TERM" else "SHORT_TERM"
+        return Triple(key, rawContent, category)
     }
 
     fun toggleBookmark(id: Long, currentStatus: Boolean) {
@@ -669,7 +789,9 @@ fun toggleMemoryMonitor() {
         _isLoading.value = true
         _streamingMessage.value = ""
 
-        val persona = Personas.findById(selectedPersonaId.value)
+        val currentId = selectedPersonaId.value
+        val persona = allPersonas.value.find { it.id == currentId } ?: Personas.findById(currentId)
+        
         val modelToUse = currentModelId.value.trim()
         val useLocal = isLocalEnabled.value
         val conversationHistory = dao.getMessages(chatId, 10).first().reversed()
@@ -887,3 +1009,4 @@ data class StreamChoice(
 data class Delta(
     @SerializedName("content") val content: String?
 )
+

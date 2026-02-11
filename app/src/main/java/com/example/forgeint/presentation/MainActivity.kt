@@ -24,21 +24,28 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
 
         setContent {
-
-            GeminiApp()
+            val intent = intent
+            GeminiApp(intent = intent)
         }
     }
 }
 
 @Composable
-fun GeminiApp(viewModel: GeminiViewModel = viewModel()) {
+fun GeminiApp(viewModel: GeminiViewModel = viewModel(), intent: android.content.Intent? = null) {
 
     val navController = rememberSwipeDismissableNavController()
     val isLiteMode by viewModel.isLiteMode.collectAsState()
+    val isVoiceDominantMode by viewModel.isVoiceDominantMode.collectAsState()
     val context = LocalContext.current
     val settingsManager = remember { SettingsManager(context) }
     val haptics = LocalHapticFeedback.current
     val appTheme by viewModel.appTheme.collectAsState()
+
+    LaunchedEffect(intent) {
+        intent?.getStringExtra("action_type")?.let {
+            viewModel.setPendingAction(it)
+        }
+    }
 
     ForgeINTTheme(themeName = appTheme) {
         SwipeDismissableNavHost(navController = navController, startDestination = "history") {
@@ -48,6 +55,7 @@ fun GeminiApp(viewModel: GeminiViewModel = viewModel()) {
             // ---------------------------------------------------------
             composable("history") {
                 val history by viewModel.history.collectAsState()
+                val pendingAction by viewModel.pendingAction.collectAsState()
 
                 // Input launcher for "New Chat"
                 val textLauncher = rememberTextInputLauncher { text ->
@@ -55,10 +63,33 @@ fun GeminiApp(viewModel: GeminiViewModel = viewModel()) {
                     navController.navigate("chat")
                 }
 
+                val voiceLauncher = rememberVoiceLauncher { text ->
+                    viewModel.startNewChat(text)
+                    navController.navigate("chat")
+                }
+
+                val newChatLauncher = {
+                    if (isVoiceDominantMode) {
+                        voiceLauncher.invoke()
+                    } else {
+                        textLauncher.invoke()
+                    }
+                }
+
+                LaunchedEffect(pendingAction) {
+                    if (pendingAction == "voice") {
+                        voiceLauncher.invoke()
+                        viewModel.clearPendingAction()
+                    } else if (pendingAction == "text") {
+                        textLauncher.invoke()
+                        viewModel.clearPendingAction()
+                    }
+                }
+
                 if (isLiteMode) {
                     LiteHistoryScreen(
                         history = history,
-                        onNewChatClick = textLauncher,
+                        onNewChatClick = newChatLauncher,
                         onChatClick = { id ->
                             viewModel.openChat(id)
                             convoID.conID.value = id.toInt()
@@ -66,14 +97,15 @@ fun GeminiApp(viewModel: GeminiViewModel = viewModel()) {
                             navController.navigate("chat")
                         },
                         onBookmarkClick = { id, status -> viewModel.toggleBookmark(id, status) },
-                        onSettingsClick = { navController.navigate("settings") }
+                        onSettingsClick = { navController.navigate("settings") },
+                        viewModel = viewModel
                     )
                 } else {
                     val searchResults by viewModel.searchResults.collectAsStateWithLifecycle()
                     val searchQuery by viewModel.searchQuery.collectAsStateWithLifecycle()
                     DetailedHistoryScreen(
                         searchResults = searchResults,
-                        onNewChatClick = textLauncher,
+                        onNewChatClick = newChatLauncher,
                         onChatClick = { id ->
                             viewModel.openChat(id)
                             haptics.performHapticFeedback(HapticFeedbackType.LongPress)
@@ -93,8 +125,8 @@ fun GeminiApp(viewModel: GeminiViewModel = viewModel()) {
                             haptics.performHapticFeedback(HapticFeedbackType.LongPress)
                         },
                         searchQuery = searchQuery,
-                        onSearchQueryChanged = { viewModel.onSearchQueryChanged(it) }
-
+                        onSearchQueryChanged = { viewModel.onSearchQueryChanged(it) },
+                        viewModel = viewModel
                     )
                 }
             }
@@ -112,7 +144,9 @@ fun GeminiApp(viewModel: GeminiViewModel = viewModel()) {
                 if (isLiteMode) {
                     LiteChatScreen(
                         messages = messages,
+                        streamingMessageFlow = viewModel.streamingMessage,
                         isTyping = isLoading,
+                        isVoiceDominant = isVoiceDominantMode,
                         onReplyClick = textLauncher,
                         onDeleteClick = {
                             viewModel.deleteChat(id = convoID.conID.value.toLong())
@@ -120,7 +154,11 @@ fun GeminiApp(viewModel: GeminiViewModel = viewModel()) {
                             haptics.performHapticFeedback(HapticFeedbackType.Confirm)
 
                         },
-                        onSwapModelClick = { navController.navigate("model_select") }
+                        onSwapModelClick = { navController.navigate("model_select") },
+                        onVoiceResult = { spokenText ->
+                            viewModel.continueChat(spokenText)
+                            haptics.performHapticFeedback(HapticFeedbackType.Confirm)
+                        }
                     )
                 } else {
 
@@ -135,6 +173,7 @@ fun GeminiApp(viewModel: GeminiViewModel = viewModel()) {
 
 
                         isBookmarked = convoID.condBK.value,
+                        isVoiceDominant = isVoiceDominantMode,
 
 
                         onReplyClick = textLauncher,
@@ -181,11 +220,15 @@ fun GeminiApp(viewModel: GeminiViewModel = viewModel()) {
             // ---------------------------------------------------------
             composable("settings") {
                 val currentModel by viewModel.currentModelId.collectAsState()
+                val allPersonas by viewModel.allPersonas.collectAsStateWithLifecycle()
                 SettingsScreen(
                     isLiteMode = isLiteMode,
+                    isVoiceDominantMode = isVoiceDominantMode,
                     currentModelId = currentModel,
+                    allPersonas = allPersonas,
 
                     onToggleLite = { viewModel.setLiteMode(it) },
+                    onToggleVoiceDominant = { viewModel.setVoiceDominantMode(it) },
                     onNavigateToModelSelect = { navController.navigate("model_select") },
                     onNavigateToPersona = { navController.navigate("persona_select") },
                     onNavigateToIP = { navController.navigate("ip_select") },
@@ -194,8 +237,51 @@ fun GeminiApp(viewModel: GeminiViewModel = viewModel()) {
                     onNavigateToSystem = { navController.navigate("system") },
                     onNavigateToMessageLength = { navController.navigate("message_length_select") },
                     onNavigateToApiKey = { navController.navigate("api_key") },
-                    onNavigateToTheme = { navController.navigate("theme_select") }
+                    onNavigateToTheme = { navController.navigate("theme_select") },
+                    onNavigateToLocalStatus = { navController.navigate("local_status") },
+                    onNavigateToHardwareMonitor = { navController.navigate("hardware_monitor") }
                 )
+            }
+            composable("hardware_monitor") {
+                val host by viewModel.currentHostIp.collectAsState()
+                
+                val cleanHost = host.removePrefix("https://").removePrefix("http://").trim('/')
+                val isTunnel = cleanHost.contains("cloudflare") || cleanHost.contains("ngrok") || cleanHost.contains("loclx")
+
+                val isEmulator = remember {
+                    android.os.Build.FINGERPRINT.startsWith("generic") ||
+                    android.os.Build.FINGERPRINT.startsWith("unknown") ||
+                    android.os.Build.MODEL.contains("google_sdk") ||
+                    android.os.Build.MODEL.contains("emulator") ||
+                    android.os.Build.MODEL.contains("Android SDK built for x86") ||
+                    android.os.Build.MANUFACTURER.contains("Genymotion") ||
+                    (android.os.Build.BRAND.startsWith("generic") && android.os.Build.DEVICE.startsWith("generic")) ||
+                    "google_sdk" == android.os.Build.PRODUCT
+                }
+
+                val effectiveHost = if (isEmulator && !isTunnel) "10.0.2.2" else cleanHost
+                val hostWithoutPort = effectiveHost.substringBefore(":")
+
+                val baseUrl = if (isTunnel) {
+                    "https://$cleanHost/"
+                } else {
+                    "http://$hostWithoutPort:8080/"
+                }
+
+                val context = LocalContext.current
+                val phoneCommunicator = remember { PhoneCommunicator(context) }
+                
+                DisposableEffect(phoneCommunicator) {
+                    onDispose { phoneCommunicator.cleanup() }
+                }
+
+                val hardwareViewModel = remember(baseUrl) {
+                    ForgeHardwareViewModel(
+                        HardwareRepository(HardwareApi.create(baseUrl), baseUrl, phoneCommunicator),
+                        viewModel.connectionMode
+                    )
+                }
+                G14WatchMonitor(viewModel = hardwareViewModel)
             }
             composable("theme_select") {
                 ThemeSelectionScreen(
@@ -229,8 +315,11 @@ fun GeminiApp(viewModel: GeminiViewModel = viewModel()) {
             composable("memory"){
                 val traits by viewModel.allTraits.collectAsStateWithLifecycle()
                 MemoryManagementScreen(
-                    traits = traits,onDeleteTrait = { traitKey ->
-                        viewModel.deleteTrait(traitKey)
+                    traits = traits,onDeleteTrait = { id ->
+                        viewModel.deleteTrait(id)
+                    },
+                    onAddManualMemory = { content, type ->
+                        viewModel.addManualMemory(content, type)
                     },
                     onClearAll = {
                         viewModel.clearAllTraits()
@@ -254,13 +343,28 @@ fun GeminiApp(viewModel: GeminiViewModel = viewModel()) {
                 )
             }
             composable("persona_select") {
+                val allPersonas by viewModel.allPersonas.collectAsStateWithLifecycle()
                 PersonaSettings(
                     settingsManager = settingsManager,
+                    allPersonas = allPersonas,
                     onPersonaSelected = {
                         navController.popBackStack()
+                    },
+                    onCreatePersonaClick = {
+                        navController.navigate("create_persona")
+                    },
+                    onDeletePersonaClick = { id ->
+                        viewModel.deletePersona(id)
                     }
-
-
+                )
+            }
+            composable("create_persona") {
+                CreatePersonaScreen(
+                    onBack = { navController.popBackStack() },
+                    onSave = { name, description, prompt ->
+                        viewModel.createPersona(name, description, prompt)
+                        navController.popBackStack()
+                    }
                 )
             }
             composable("ip_select") {
@@ -301,6 +405,9 @@ fun GeminiApp(viewModel: GeminiViewModel = viewModel()) {
 
             composable("local_model") {
                 LocalModelScreen(viewModel = viewModel)
+            }
+            composable("local_status") {
+                LocalServerStatus()
             }
             composable("neural_network") {
                 WearNeuralPerceptron()

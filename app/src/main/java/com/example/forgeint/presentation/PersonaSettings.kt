@@ -1,5 +1,6 @@
 package com.example.forgeint.presentation
 
+import Persona
 import androidx.activity.result.launch
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -9,7 +10,9 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.RadioButtonUnchecked
+import androidx.compose.material.icons.rounded.Add
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -55,33 +58,38 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.wear.compose.foundation.rotary.rotaryScrollable
 import androidx.wear.compose.material.*
+import com.example.forgeint.presentation.theme.LocalForgeIntColors
 import kotlinx.coroutines.launch
 
 @Composable
 fun PersonaSettings(
     settingsManager: SettingsManager,
-    onPersonaSelected: () -> Unit
+    allPersonas: List<Persona>,
+    onPersonaSelected: () -> Unit,
+    onCreatePersonaClick: () -> Unit,
+    onDeletePersonaClick: (String) -> Unit
 ) {
     val currentPersonaId by settingsManager.selectedPersonaId.collectAsState(initial = "default")
     val coroutineScope = rememberCoroutineScope()
     val listState = rememberScalingLazyListState()
     val haptics = LocalHapticFeedback.current
     val focusRequester = remember { FocusRequester() }
-
+    val colors = LocalForgeIntColors.current
     // Category mapping for personas
     var selectedCategory by remember { mutableStateOf("All") }
-    val categories = listOf("All", "Logic", "Dev", "Lifestyle", "Chaos")
+    val categories = listOf("All", "Logic", "Dev", "Lifestyle", "Chaos", "Custom")
 
-    val personas = remember { Personas.list }
-
-    val filteredPersonas = remember(selectedCategory) {
-        if (selectedCategory == "All") personas
-        else personas.filter { persona ->
+    val filteredPersonas = remember(selectedCategory, allPersonas) {
+        if (selectedCategory == "All") allPersonas
+        else if (selectedCategory == "Custom") allPersonas.filter { persona ->
+             !Personas.list.any { it.id == persona.id }
+        }
+        else allPersonas.filter { persona ->
             when (selectedCategory) {
                 "Logic" -> persona.id in listOf("philosopher", "historian")
                 "Dev" -> persona.id in listOf("code_helper", "tech_architect")
                 "Lifestyle" -> persona.id in listOf("fitness_coach", "medical_consultant", "travel_guide", "performance_psychologist")
-                "Chaos" -> persona.id == "shitposter"
+                "Chaos" -> persona.id in listOf("shitposter", "nsfw_uncensored","nsfw_shitposter","pure_roleplay")
                 else -> true
             }
         }
@@ -112,6 +120,17 @@ fun PersonaSettings(
                 )
             }
 
+            // Create Button
+            item {
+                Button(
+                    onClick = onCreatePersonaClick,
+                    modifier = Modifier.fillMaxWidth().height(40.dp),
+                    colors = ButtonDefaults.primaryButtonColors(backgroundColor = colors.primary)
+                ) {
+                    Text("Create New")
+                }
+            }
+
             // Filter Chips Row
             item {
                 Row(
@@ -138,8 +157,8 @@ fun PersonaSettings(
                                 )
                             },
                             colors = ChipDefaults.gradientBackgroundChipColors(
-                                startBackgroundColor = if (isFilterSelected) Color(0xFF081A36) else Color(0xFF1C1B1F),
-                                endBackgroundColor = if (isFilterSelected) Color(0xFF5C4D00) else Color(0xFF1C1B1F),
+                                startBackgroundColor = if (isFilterSelected) colors.primary else Color(0xFF1C1B1F),
+                                endBackgroundColor = if (isFilterSelected) colors.background else Color(0xFF1C1B1F),
                                 contentColor = if (isFilterSelected) Color.White else Color(0xFFCAC4D0)
                             ),
                             modifier = (Modifier as Modifier)
@@ -164,39 +183,73 @@ fun PersonaSettings(
                 key = { it.id }
             ) { persona ->
                 val isSelected = remember(currentPersonaId) { persona.id == currentPersonaId }
+                val isDefault = remember { Personas.list.any { it.id == persona.id } }
 
-                ToggleChip(
-                    checked = isSelected,
-                    onCheckedChange = {
-                        coroutineScope.launch {
-                            settingsManager.setSelectedPersona(persona.id)
-                            haptics.performHapticFeedback(HapticFeedbackType.VirtualKey)
-                            onPersonaSelected()
-                        }
-                    },
-                    label = { Text(persona.name) },
-                    secondaryLabel = {
-                        Text(
-                            text = persona.description,
-                            maxLines = 2,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                    },
-                    toggleControl = {
-                        Icon(
-                            imageVector = if (isSelected) Icons.Default.CheckCircle else Icons.Default.RadioButtonUnchecked,
-                            contentDescription = null,
-                            tint = if (isSelected) Color(0xFFFFD700) else Color.White.copy(alpha = 0.6f)
-                        )
-                    },
-                    colors = ToggleChipDefaults.toggleChipColors(
-                        checkedStartBackgroundColor = Color(0xFF0D47A1),
-                        checkedEndBackgroundColor = Color(0xFFFFD700),
-                        uncheckedStartBackgroundColor = Color.Black,
-                        uncheckedEndBackgroundColor = Color.Black
-                    ),
-                    modifier = Modifier.fillMaxWidth()
-                )
+                
+                if (!isDefault) {
+                     SplitToggleChip(
+                        checked = isSelected,
+                        onCheckedChange = {
+                             coroutineScope.launch {
+                                settingsManager.setSelectedPersona(persona.id)
+                                haptics.performHapticFeedback(HapticFeedbackType.VirtualKey)
+                                onPersonaSelected()
+                            }
+                        },
+                        label = { Text(persona.name) },
+                        secondaryLabel = { Text("Custom") },
+                        toggleControl = {
+                            Icon(
+                                imageVector = if (isSelected) Icons.Default.CheckCircle else Icons.Default.RadioButtonUnchecked,
+                                contentDescription = null,
+                                tint = if (isSelected) Color(0xFFFFD700) else Color.White.copy(alpha = 0.6f)
+                            )
+                        },
+                        onClick = {
+                             coroutineScope.launch {
+                                settingsManager.setSelectedPersona(persona.id)
+                                haptics.performHapticFeedback(HapticFeedbackType.VirtualKey)
+                                onPersonaSelected()
+                            }
+                        },
+
+                    )
+
+
+                } else {
+                    ToggleChip(
+                        checked = isSelected,
+                        onCheckedChange = {
+                            coroutineScope.launch {
+                                settingsManager.setSelectedPersona(persona.id)
+                                haptics.performHapticFeedback(HapticFeedbackType.VirtualKey)
+                                onPersonaSelected()
+                            }
+                        },
+                        label = { Text(persona.name) },
+                        secondaryLabel = {
+                            Text(
+                                text = persona.description,
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        },
+                        toggleControl = {
+                            Icon(
+                                imageVector = if (isSelected) Icons.Default.CheckCircle else Icons.Default.RadioButtonUnchecked,
+                                contentDescription = null,
+                                tint = if (isSelected) Color(0xFFFFD700) else Color.White.copy(alpha = 0.6f)
+                            )
+                        },
+                        colors = ToggleChipDefaults.toggleChipColors(
+                            checkedStartBackgroundColor = colors.botBubble,
+                            checkedEndBackgroundColor = colors.background,
+                            uncheckedStartBackgroundColor = Color.Black,
+                            uncheckedEndBackgroundColor = Color.Black
+                        ),
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
             }
         }
     }

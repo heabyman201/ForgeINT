@@ -29,8 +29,12 @@ class SettingsManager(private val context: Context) {
     private val API_KEY_KEY = stringPreferencesKey("api_key")
     private val IS_CUSTOM_API_KEY_ENABLED_KEY = booleanPreferencesKey("is_custom_api_key_enabled")
     private val APP_THEME_KEY = stringPreferencesKey("app_theme")
+    private val VOICE_DOMINANT_MODE_KEY = booleanPreferencesKey("voice_dominant_mode")
 
     // --- Flows ---
+
+    val isVoiceDominantMode: Flow<Boolean> = context.dataStore.data
+        .map { it[VOICE_DOMINANT_MODE_KEY] ?: false }
 
     val isLiteMode: Flow<Boolean> = context.dataStore.data
         .map { it[LITE_MODE_KEY] ?: true }
@@ -119,7 +123,20 @@ suspend fun setMemoryMonitorEnabled(enabled: Boolean) {
         context.dataStore.edit { it[IS_CUSTOM_API_KEY_ENABLED_KEY] = enabled }
     }
 
-    suspend fun setAppTheme(theme: String) {
-        context.dataStore.edit { it[APP_THEME_KEY] = theme }
+        suspend fun setAppTheme(theme: String) {
+
+            context.dataStore.edit { it[APP_THEME_KEY] = theme }
+
+        }
+
+    
+
+        suspend fun setVoiceDominantMode(enabled: Boolean) {
+
+            context.dataStore.edit { it[VOICE_DOMINANT_MODE_KEY] = enabled }
+
+        }
+
     }
-}
+
+    

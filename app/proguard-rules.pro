@@ -19,3 +19,22 @@
 # If you keep the line number information, uncomment this to
 # hide the original source file name.
 #-renamesourcefileattribute SourceFile
+
+# Retrofit + coroutines metadata needed by dynamic proxy and suspend adapters.
+-keepattributes Signature,InnerClasses,EnclosingMethod
+-keepattributes RuntimeVisibleAnnotations,RuntimeVisibleParameterAnnotations
+-keep class kotlin.coroutines.Continuation
+-keep class retrofit2.Response
+-keep,allowobfuscation,allowshrinking interface * {
+    @retrofit2.http.* <methods>;
+}
+
+# Keep JSON model fields referenced by @SerializedName for Gson under obfuscation.
+-keepclassmembers,allowobfuscation class * {
+    @com.google.gson.annotations.SerializedName <fields>;
+}
+
+# Keep hardware endpoint types that are reflected by Retrofit/Gson.
+-keep class com.example.forgeint.presentation.HardwareApi { *; }
+-keep class com.example.forgeint.presentation.HardwareResponse { *; }
+-keep class com.example.forgeint.presentation.HardwareNode { *; }

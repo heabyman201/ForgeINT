@@ -1,4 +1,4 @@
-package com.example.forgeint_phone.data
+package com.example.forgeint.data
 
 import androidx.room.Dao
 import androidx.room.Entity
@@ -35,6 +35,10 @@ object MemoryPrompter {
         Analyze the user message for permanent traits, preferences, or facts.
         You MUST extract multiple traits if present. 
         Each key must be SPECIFIC (e.g., 'PREF_LANGUAGE' instead of just 'LANGUAGE').
+        Do NOT output vague or meta-conversation facts like "User is talking about something".
+        Do NOT store instruction text like "save this to long term" as memory.
+        Do NOT store lexical observations like "user used X word".
+        Only output concrete, user-specific facts/preferences.
         
         Format: KEY|VALUE|CATEGORY
         Example: 

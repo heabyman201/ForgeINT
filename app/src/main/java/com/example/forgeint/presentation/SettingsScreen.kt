@@ -1,4 +1,5 @@
 package com.example.forgeint.presentation
+import Persona
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
 import androidx.compose.foundation.background
@@ -16,9 +17,13 @@ import androidx.compose.material.icons.filled.PrivateConnectivity
 import androidx.compose.material.icons.filled.SaveAlt
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.WifiFind
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.foundation.focusable
+import androidx.compose.ui.Alignment
+import androidx.compose.runtime.derivedStateOf
 import androidx.wear.compose.material.Vignette
 import androidx.wear.compose.material.VignettePosition
-import androidx.wear.compose.material.Scaffold
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -32,17 +37,21 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.wear.compose.foundation.lazy.ScalingLazyColumn
+import androidx.wear.compose.foundation.lazy.TransformingLazyColumn
 import androidx.wear.compose.foundation.lazy.items
-import androidx.wear.compose.foundation.lazy.rememberScalingLazyListState
+import androidx.wear.compose.foundation.lazy.rememberTransformingLazyColumnState
+import androidx.wear.compose.foundation.lazy.TransformingLazyColumnState
+import androidx.wear.compose.material3.ScrollIndicator
+import androidx.wear.compose.material.ScalingLazyColumn
+import androidx.wear.compose.material.ScalingLazyListState
+import androidx.wear.compose.material.rememberScalingLazyListState
+import androidx.wear.compose.material.PositionIndicator
 import androidx.wear.compose.material.Chip
 import androidx.wear.compose.material.ChipDefaults
 import androidx.wear.compose.material.Icon
 import androidx.wear.compose.material.MaterialTheme
-import androidx.wear.compose.material.PositionIndicator
 import androidx.wear.compose.material.RadioButton
 import androidx.wear.compose.material.Scaffold
-import androidx.wear.compose.material.ScalingLazyColumn
 import androidx.wear.compose.material.Switch
 import androidx.wear.compose.material.Text
 import androidx.wear.compose.material.ToggleChip
@@ -55,18 +64,26 @@ import androidx.wear.compose.material.CompactChip
 import androidx.compose.foundation.border
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.ui.text.font.FontWeight
-import androidx.wear.compose.material.Chip
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.wear.compose.foundation.lazy.items
+import androidx.compose.material.icons.filled.Computer
+import androidx.compose.material.icons.filled.Memory
 import com.example.forgeint.presentation.theme.LocalForgeIntColors
+import androidx.compose.ui.input.rotary.onRotaryScrollEvent
+import kotlinx.coroutines.launch
+import androidx.compose.foundation.gestures.scrollBy
+import androidx.wear.compose.material.items as materialItems
+
 
 @Composable
 fun SettingsScreen(
     isLiteMode: Boolean,
+    isVoiceDominantMode: Boolean,
     currentModelId: String,
+    allPersonas: List<Persona>,
     onToggleLite: (Boolean) -> Unit,
+    onToggleVoiceDominant: (Boolean) -> Unit,
     onNavigateToModelSelect: () -> Unit,
     onNavigateToPersona: () -> Unit,
     onNavigateToIP: () -> Unit,
@@ -75,10 +92,14 @@ fun SettingsScreen(
     onNavigateToSystem: () -> Unit,
     onNavigateToMessageLength: () -> Unit,
     onNavigateToApiKey: () -> Unit,
-    onNavigateToTheme: () -> Unit
+
+    onNavigateToTheme: () -> Unit,
+    onNavigateToLocalStatus: () -> Unit,
+    onNavigateToHardwareMonitor: () -> Unit
 ) {
-    val listState = androidx.wear.compose.material.rememberScalingLazyListState()
+    val listState = rememberTransformingLazyColumnState()
     val context = LocalContext.current
+    val coroutineScope = rememberCoroutineScope()
     val settingsManager = remember { SettingsManager(context) }
     val personaId by settingsManager.selectedPersonaId.collectAsState(initial = "default")
     val modelId by settingsManager.selectedModel.collectAsState(initial = "google/gemma-3n-e4b-it:free")
@@ -107,8 +128,8 @@ fun SettingsScreen(
 
         }
     }
-    val currentPersonaName = remember(personaId) {
-        Personas.findById(personaId).name
+    val currentPersonaName = remember(personaId, allPersonas) {
+        allPersonas.find { it.id == personaId }?.name ?: Personas.findById(personaId).name
     }
 
     val focusRequester = remember { FocusRequester() }
@@ -117,13 +138,20 @@ fun SettingsScreen(
         focusRequester.requestFocus()
     }
     Scaffold(
-        positionIndicator = { PositionIndicator(scalingLazyListState = listState) }
+        positionIndicator = { ScrollIndicator(state = listState) }
     ) {
-        ScalingLazyColumn(
+        TransformingLazyColumn(
             modifier = Modifier
                 .fillMaxSize()
                 .background(colors.background)
-                .rotaryScrollable(listState, focusRequester),
+                .onRotaryScrollEvent {
+                    coroutineScope.launch {
+                        listState.scrollBy(it.verticalScrollPixels * 2f)
+                    }
+                    true
+                }
+                .focusRequester(focusRequester)
+                .focusable(),
             state = listState,
             contentPadding = PaddingValues(horizontal = 10.dp, vertical = 40.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp)
@@ -147,6 +175,24 @@ fun SettingsScreen(
                         uncheckedStartBackgroundColor = colors.surface,
                         uncheckedEndBackgroundColor = colors.surface
 
+                    )
+                )
+            }
+
+            // Voice-Dominant Mode Toggle
+            item {
+                ToggleChip(
+                    checked = isVoiceDominantMode,
+                    onCheckedChange = onToggleVoiceDominant,
+                    label = { Text("Voice-Dominant Mode") },
+                    secondaryLabel = { Text(if (isVoiceDominantMode) "On" else "Off") },
+                    toggleControl = { Switch(checked = isVoiceDominantMode, onCheckedChange = null) },
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = ToggleChipDefaults.toggleChipColors(
+                        checkedStartBackgroundColor = Color(0xFF1A3608),
+                        checkedEndBackgroundColor = Color(0xFF005C4D),
+                        uncheckedStartBackgroundColor = colors.surface,
+                        uncheckedEndBackgroundColor = colors.surface
                     )
                 )
             }
@@ -292,6 +338,26 @@ fun SettingsScreen(
                     modifier = Modifier.fillMaxWidth()
                 )
             }
+            item {
+                Chip(
+                    onClick = onNavigateToHardwareMonitor,
+                    label = { Text("Local Hardware Monitor", color = colors.botText) },
+                    secondaryLabel = {
+                        Text(
+                            "Monitor PC Stats",
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            color = colors.userText
+                        )
+                    },
+                    icon = { Icon(Icons.Default.Memory, "Hardware Monitor", tint = colors.primary) },
+                    colors = ChipDefaults.gradientBackgroundChipColors(
+                        startBackgroundColor = colors.userBubble,
+                        endBackgroundColor = colors.surface
+                    ),
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
 
 
 
@@ -304,409 +370,247 @@ fun SettingsScreen(
 @Composable
 
 fun MessageLengthSelectionScreen(
-
     selectedLength: String,
-
     onLengthSelected: (String) -> Unit
-
 ) {
-
-    val listState = rememberScalingLazyListState()
-
-    val lengths = listOf("Shorter", "Normal", "Longer")
-
+    val listState = rememberTransformingLazyColumnState()
+    val coroutineScope = rememberCoroutineScope()
+    val focusRequester = remember { FocusRequester() }
+    val lengths = remember { listOf("Shorter", "Normal", "Longer") }
     val colors = LocalForgeIntColors.current
 
-
+    LaunchedEffect(Unit) {
+        focusRequester.requestFocus()
+    }
 
     Scaffold(
-
-        positionIndicator = { PositionIndicator(scalingLazyListState = listState) }
-
+        positionIndicator = { ScrollIndicator(state = listState) }
     ) {
-
-        ScalingLazyColumn(
-
+        TransformingLazyColumn(
             modifier = Modifier
-
                 .fillMaxSize()
-
-                .background(colors.background),
-
+                .background(colors.background)
+                .onRotaryScrollEvent {
+                    coroutineScope.launch {
+                        listState.scrollBy(it.verticalScrollPixels * 2f)
+                    }
+                    true
+                }
+                .focusRequester(focusRequester)
+                .focusable(),
             state = listState,
-
             contentPadding = PaddingValues(horizontal = 10.dp, vertical = 40.dp),
-
             verticalArrangement = Arrangement.spacedBy(8.dp)
-
         ) {
-
             item {
-
                 Text(
                     "Response Length",
                     style = MaterialTheme.typography.caption1,
                     color = colors.onPrimary
                 )
-
             }
 
-
-
-            items(lengths) { length ->
-
+            items(lengths, key = { it }) { length ->
                 val isSelected = (length == selectedLength)
 
-
-
                 ToggleChip(
-
                     checked = isSelected,
-
                     onCheckedChange = { onLengthSelected(length) },
-
                     label = { Text(length) },
-
                     toggleControl = {
-
                         RadioButton(selected = isSelected)
-
                     },
-
                     modifier = Modifier.fillMaxWidth(),
-
                     colors = ToggleChipDefaults.toggleChipColors(
-
                         checkedStartBackgroundColor = Color(0xFF081A36),
-
                         checkedEndBackgroundColor = Color(0xFF5C4D00),
-
                         uncheckedStartBackgroundColor = colors.surface,
-
                         uncheckedEndBackgroundColor = colors.surface
-
                     )
-
                 )
-
             }
-
         }
-
     }
-
 }
+
 @Composable
-
 fun SystemMonitorSettings(
-
     onToggleMemory: () -> Unit,
-
     onToggleThermal: () -> Unit
-
 ) {
-
-    val listState = rememberScalingLazyListState()
-
+    val listState = rememberTransformingLazyColumnState()
+    val coroutineScope = rememberCoroutineScope()
+    val focusRequester = remember { FocusRequester() }
     val context = LocalContext.current
-
     val settingsManager = remember { SettingsManager(context) }
-
     val memory_monitor by settingsManager.isMemoryMonitorEnabled.collectAsState(false)
-
     val thermal_monitor by settingsManager.isSystemTelemetryEnabled.collectAsState(false)
-
     val colors = LocalForgeIntColors.current
 
-
+    LaunchedEffect(Unit) {
+        focusRequester.requestFocus()
+    }
 
     Scaffold(
-
-        positionIndicator = { PositionIndicator(scalingLazyListState = listState) }
-
+        positionIndicator = { ScrollIndicator(state = listState) }
     ) {
-
-        ScalingLazyColumn(
-
+        TransformingLazyColumn(
             modifier = Modifier
-
                 .fillMaxSize()
-
-                .background(colors.background),
-
+                .background(colors.background)
+                .onRotaryScrollEvent {
+                    coroutineScope.launch {
+                        listState.scrollBy(it.verticalScrollPixels * 2f)
+                    }
+                    true
+                }
+                .focusRequester(focusRequester)
+                .focusable(),
             state = listState,
-
             contentPadding = PaddingValues(horizontal = 10.dp, vertical = 40.dp),
-
             verticalArrangement = Arrangement.spacedBy(8.dp)
-
         ) {
-
             item {
-
                 Text(
                     "Performance Monitors",
                     style = MaterialTheme.typography.caption1,
                     color = colors.userText
                 )
-
             }
 
             item {
-
                 ToggleChip(
-
                     checked = memory_monitor,
-
-                    onCheckedChange = {
-
-                        onToggleMemory()
-
-
-                    },
-
+                    onCheckedChange = { onToggleMemory() },
                     label = { Text("Memory Monitor") },
-
-                    toggleControl = {
-
-                        RadioButton(selected = memory_monitor)
-
-                    },
-
+                    toggleControl = { RadioButton(selected = memory_monitor) },
                     modifier = Modifier.fillMaxWidth(),
-
                     colors = ToggleChipDefaults.toggleChipColors(
-
                         checkedStartBackgroundColor = Color(0xFF081A36),
-
                         checkedEndBackgroundColor = Color(0xFF5C4D00),
-
                         uncheckedStartBackgroundColor = colors.surface,
-
                         uncheckedEndBackgroundColor = colors.surface
-
                     )
-
                 )
-
             }
 
             item {
-
                 ToggleChip(
-
                     checked = thermal_monitor,
-
-                    onCheckedChange = {
-
-                        onToggleThermal()
-
-
-                    },
-
+                    onCheckedChange = { onToggleThermal() },
                     label = { Text("Thermal Monitor") },
-
-                    toggleControl = {
-
-                        RadioButton(selected = thermal_monitor)
-
-                    },
-
+                    toggleControl = { RadioButton(selected = thermal_monitor) },
                     modifier = Modifier.fillMaxWidth(),
-
                     colors = ToggleChipDefaults.toggleChipColors(
-
                         checkedStartBackgroundColor = Color(0xFF081A36),
-
                         checkedEndBackgroundColor = Color(0xFF5C4D00),
-
                         uncheckedStartBackgroundColor = colors.surface,
-
                         uncheckedEndBackgroundColor = colors.surface
-
                     )
-
                 )
-
             }
-
-
         }
-
     }
-
 }
 @Composable
 
 fun ApiKeySettingsScreen(
-
     onApiKeyChanged: (String) -> Unit,
-
     onToggleCustomKey: (Boolean) -> Unit
-
 ) {
-
-    val listState = rememberScalingLazyListState()
-
+    val listState = rememberTransformingLazyColumnState()
+    val coroutineScope = rememberCoroutineScope()
+    val focusRequester = remember { FocusRequester() }
     val context = LocalContext.current
-
     val settingsManager = remember { SettingsManager(context) }
-
     val isCustomKeyEnabled by settingsManager.isCustomApiKeyEnabled.collectAsState(false)
-
     val currentApiKey by settingsManager.apiKey.collectAsState("")
-
     val colors = LocalForgeIntColors.current
-
 
     val launcher = rememberTextInputLauncher(onInputReceived = onApiKeyChanged)
 
-
+    LaunchedEffect(Unit) {
+        focusRequester.requestFocus()
+    }
 
     Scaffold(
-
-        positionIndicator = { PositionIndicator(scalingLazyListState = listState) }
-
+        positionIndicator = { ScrollIndicator(state = listState) }
     ) {
-
-        ScalingLazyColumn(
-
+        TransformingLazyColumn(
             modifier = Modifier
-
                 .fillMaxSize()
-
-                .background(colors.background),
-
+                .background(colors.background)
+                .onRotaryScrollEvent {
+                    coroutineScope.launch {
+                        listState.scrollBy(it.verticalScrollPixels * 2f)
+                    }
+                    true
+                }
+                .focusRequester(focusRequester)
+                .focusable(),
             state = listState,
-
             contentPadding = PaddingValues(horizontal = 10.dp, vertical = 40.dp),
-
             verticalArrangement = Arrangement.spacedBy(8.dp)
-
         ) {
-
             item {
-
                 Text(
                     "API Key Settings",
                     style = MaterialTheme.typography.caption1,
                     color = colors.onPrimary
                 )
-
             }
-
-
 
             item {
-
                 ToggleChip(
-
                     checked = isCustomKeyEnabled,
-
                     onCheckedChange = onToggleCustomKey,
-
                     label = { Text("Use Custom API Key") },
-
-                    toggleControl = {
-
-                        Switch(checked = isCustomKeyEnabled, onCheckedChange = null)
-
-                    },
-
+                    toggleControl = { Switch(checked = isCustomKeyEnabled, onCheckedChange = null) },
                     modifier = Modifier.fillMaxWidth(),
-
                     colors = ToggleChipDefaults.toggleChipColors(
-
                         checkedStartBackgroundColor = Color(0xFF081A36),
-
                         checkedEndBackgroundColor = Color(0xFF5C4D00),
-
                         uncheckedStartBackgroundColor = colors.surface,
-
                         uncheckedEndBackgroundColor = colors.surface
-
                     )
-
                 )
-
             }
-
-
 
             if (isCustomKeyEnabled) {
-
                 item {
-
                     Chip(
-
                         onClick = { launcher() },
-
                         label = { Text("Edit API Key") },
-
                         secondaryLabel = {
-
                             Text(
-
                                 if (currentApiKey.isNotEmpty()) "Key Set (Tap to change)" else "No Key Set",
-
                                 maxLines = 1,
-
                                 overflow = TextOverflow.Ellipsis,
-
                                 color = Color.LightGray
-
                             )
-
                         },
-
                         icon = { Icon(Icons.Default.SaveAlt, "Edit Key") },
-
                         colors = ChipDefaults.gradientBackgroundChipColors(
-
                             startBackgroundColor = Color(0xFF335C77),
-
                             endBackgroundColor = colors.surface
-
                         ),
-
                         modifier = Modifier.fillMaxWidth()
-
                     )
-
                 }
-
-
 
                 if (currentApiKey.isNotEmpty()) {
-
                     item {
-
                         Text(
-
-                            text = "Current Key: ${currentApiKey.take(4)}...${
-                                currentApiKey.takeLast(
-                                    4
-                                )
-                            }",
-
+                            text = "Current Key: ${currentApiKey.take(4)}...${currentApiKey.takeLast(4)}",
                             style = MaterialTheme.typography.caption2,
-
                             color = Color.Gray,
-
                             modifier = Modifier.padding(horizontal = 10.dp)
-
                         )
-
                     }
-
                 }
-
             }
-
         }
-
     }
-
 }
 @Composable
 fun ModelSelectionScreen(
@@ -715,88 +619,32 @@ fun ModelSelectionScreen(
     availableModels: List<String> = emptyList(),
     isLocalEnabled: Boolean = false
 ) {
-    val listState = rememberScalingLazyListState()
+    val listState = rememberTransformingLazyColumnState()
+    val coroutineScope = rememberCoroutineScope()
+    val focusRequester = remember { FocusRequester() }
     var selectedCompany by remember { mutableStateOf("All") }
-    val companies = listOf(
-        "All",
-        "Google",
-        "Meta",
-        "Alibaba",
-        "OpenAI",
-        "Z-AI",
-        "Mistral",
-        "Deepseek",
-        "Nvidia",
-        "Local"
-    )
+    val companies = remember {
+        listOf(
+            "All", "Google", "Meta", "Alibaba", "OpenAI",
+            "Z-AI", "Mistral", "Deepseek", "Nvidia", "Local"
+        )
+    }
 
     val defaultModels = remember {
         listOf(
-            AiModel(
-                "google/gemma-3n-e4b-it:free",
-                "Gemma 3N E4B",
-                "Multimodal: Video, Audio & Mobile efficiency"
-            ),
-            AiModel(
-                "qwen/qwen3-4b:free",
-                "Qwen 4B",
-                "High-speed reasoning & Multilingual coding"
-            ),
-            AiModel(
-                "z-ai/glm-4.5-air:free",
-                "GLM 4.5",
-                "Agentic workflows & Native tool-calling"
-            ),
-            AiModel(
-                "meta-llama/llama-3.1-405b-instruct:free",
-                "Llama 3.1 405B",
-                "Frontier-level intelligence & massive scale reasoning"
-            ),
-            AiModel(
-                "meta-llama/llama-3.3-70b-instruct:free",
-                "Llama 3.3 70B",
-                "Complex instruction following & Reasoning"
-            ),
-            AiModel(
-                "google/gemma-3-27b-it:free",
-                "Gemma 3 27B",
-                "Dense Vision-Language & Deep logic"
-            ),
-            AiModel(
-                "google/gemma-2-9b-it:free",
-                "Gemma 2.9B",
-                "Balanced performance for general tasks"
-            ),
-            AiModel(
-                "google/gemma-3n-e2b-it:free",
-                "Gemma 3N E2B",
-                "Ultra-lightweight multimodal for edge devices"
-            ),
-            AiModel(
-                "openai/gpt-oss-120b:free",
-                "GPT OSS 120B",
-                "Frontier reasoning & Advanced web browsing"
-            ),
-            AiModel(
-                "openai/gpt-oss-20b:free",
-                "GPT OSS 20B",
-                "Fast local reasoning & STEM specialist"
-            ),
-            AiModel(
-                "cognitivecomputations/dolphin-mistral-24b-venice-edition:free",
-                "Dolphin Mistral 24B",
-                "Uncensored roleplay & Multi-turn logic"
-            ),
-            AiModel(
-                "tngtech/deepseek-r1t2-chimera:free",
-                "Deepseek Chimera",
-                "Reasoning-focused merge: Advanced logic, coding & creative roleplay"
-            ),
-            AiModel(
-                "nvidia/llama-3.1-nemotron-70b-instruct:free",
-                "Nemotron 70B",
-                "Extremely helpful response style & high-quality formatting"
-            ),
+            AiModel("google/gemma-3n-e4b-it:free", "Gemma 3N E4B", "Multimodal: Video, Audio & Mobile efficiency"),
+            AiModel("qwen/qwen3-4b:free", "Qwen 4B", "High-speed reasoning & Multilingual coding"),
+            AiModel("z-ai/glm-4.5-air:free", "GLM 4.5", "Agentic workflows & Native tool-calling"),
+            AiModel("meta-llama/llama-3.1-405b-instruct:free", "Llama 3.1 405B", "Frontier-level intelligence & massive scale reasoning"),
+            AiModel("meta-llama/llama-3.3-70b-instruct:free", "Llama 3.3 70B", "Complex instruction following & Reasoning"),
+            AiModel("google/gemma-3-27b-it:free", "Gemma 3 27B", "Dense Vision-Language & Deep logic"),
+            AiModel("google/gemma-2-9b-it:free", "Gemma 2.9B", "Balanced performance for general tasks"),
+            AiModel("google/gemma-3n-e2b-it:free", "Gemma 3N E2B", "Ultra-lightweight multimodal for edge devices"),
+            AiModel("openai/gpt-oss-120b:free", "GPT OSS 120B", "Frontier reasoning & Advanced web browsing"),
+            AiModel("openai/gpt-oss-20b:free", "GPT OSS 20B", "Fast local reasoning & STEM specialist"),
+            AiModel("cognitivecomputations/dolphin-mistral-24b-venice-edition:free", "Dolphin Mistral 24B", "Uncensored roleplay & Multi-turn logic"),
+            AiModel("tngtech/deepseek-r1t2-chimera:free", "Deepseek Chimera", "Reasoning-focused merge: Advanced logic, coding & creative roleplay"),
+            AiModel("nvidia/llama-3.1-nemotron-70b-instruct:free", "Nemotron 70B", "Extremely helpful response style & high-quality formatting"),
         )
     }
 
@@ -813,7 +661,7 @@ fun ModelSelectionScreen(
             defaultModels
         }
     }
-
+    val colors = LocalForgeIntColors.current
     val filteredModels = remember(selectedCompany, activeModels) {
         if (selectedCompany == "All") activeModels
         else activeModels.filter { model ->
@@ -832,15 +680,26 @@ fun ModelSelectionScreen(
         }
     }
 
-    Scaffold(
-        positionIndicator = { PositionIndicator(scalingLazyListState = listState) },
-        vignette = { Vignette(vignettePosition = VignettePosition.TopAndBottom) }
+    LaunchedEffect(Unit) {
+        focusRequester.requestFocus()
+    }
 
+    Scaffold(
+        positionIndicator = { ScrollIndicator(state = listState) },
+        vignette = { Vignette(vignettePosition = VignettePosition.TopAndBottom) }
     ) {
-        ScalingLazyColumn(
+        TransformingLazyColumn(
             modifier = Modifier
                 .fillMaxSize()
-                .background(Color.Black),
+                .background(Color.Black)
+                .onRotaryScrollEvent {
+                    coroutineScope.launch {
+                        listState.scrollBy(it.verticalScrollPixels * 2f)
+                    }
+                    true
+                }
+                .focusRequester(focusRequester)
+                .focusable(),
             state = listState,
             contentPadding = PaddingValues(horizontal = 10.dp, vertical = 40.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp)
@@ -877,15 +736,9 @@ fun ModelSelectionScreen(
                                     )
                                 },
                                 colors = ChipDefaults.gradientBackgroundChipColors(
-                                    startBackgroundColor = if (isSelected) Color(0xFF081A36) else Color(
-                                        0xFF1C1B1F
-                                    ),
-                                    endBackgroundColor = if (isSelected) Color(0xFF5C4D00) else Color(
-                                        0xFF1C1B1F
-                                    ),
-                                    contentColor = if (isSelected) Color.White else Color(
-                                        0xFFCAC4D0
-                                    )
+                                    startBackgroundColor = if (isSelected) colors.primary else Color(0xFF1C1B1F),
+                                    endBackgroundColor = if (isSelected) colors.background else Color(0xFF1C1B1F),
+                                    contentColor = if (isSelected) Color.White else Color(0xFFCAC4D0)
                                 ),
                                 modifier = Modifier
                                     .height(32.dp)
@@ -916,7 +769,7 @@ fun ModelSelectionScreen(
                 }
             }
 
-            items(filteredModels) { model ->
+            items(filteredModels, key = { it.id }) { model ->
                 val isSelected = (model.id == selectedModelId)
 
                 ToggleChip(
@@ -943,8 +796,8 @@ fun ModelSelectionScreen(
                     },
                     modifier = Modifier.fillMaxWidth(),
                     colors = ToggleChipDefaults.toggleChipColors(
-                        checkedStartBackgroundColor = Color(0xFF0D47A1),
-                        checkedEndBackgroundColor = Color(0xFFFFD700),
+                        checkedStartBackgroundColor = colors.botBubble,
+                        checkedEndBackgroundColor = colors.background,
                         uncheckedStartBackgroundColor = Color.Black,
                         uncheckedEndBackgroundColor = Color.Black
                     )
@@ -959,37 +812,39 @@ fun ThemeSelectionScreen(
     currentTheme: String,
     onThemeSelected: (String) -> Unit
 ) {
-    val listState = rememberScalingLazyListState()
-    val themes = listOf(
-        "Default",
-        "Cyberpunk",
-        "Crimson",
-        "Sunset",
-        "Dark Purple",
-        "Midnight Blue",
-        "Forest Deep",
-        "Slate Gray",
-        "Royal Gold",
-        "Neon Violet",
-        "Nature",
-        "Minimal",
-        "OLED",
-        "Matrix",
-        "Solarized",
-        "Cotton Candy",
-        "High Contrast",
-
-    )
+    val listState = rememberTransformingLazyColumnState()
+    val coroutineScope = rememberCoroutineScope()
+    val focusRequester = remember { FocusRequester() }
+    val themes = remember {
+        listOf(
+            "Default", "Cyberpunk", "Crimson", "Sunset", "Dark Purple",
+            "Midnight Blue", "Forest Deep", "Slate Gray", "Royal Gold",
+            "Neon Violet", "Nature", "Minimal", "OLED", "Matrix",
+            "Solarized", "Cotton Candy", "High Contrast",
+        )
+    }
 
     val colors = LocalForgeIntColors.current
 
+    LaunchedEffect(Unit) {
+        focusRequester.requestFocus()
+    }
+
     Scaffold(
-        positionIndicator = { PositionIndicator(scalingLazyListState = listState) }
+        positionIndicator = { ScrollIndicator(state = listState) }
     ) {
-        ScalingLazyColumn(
+        TransformingLazyColumn(
             modifier = Modifier
                 .fillMaxSize()
-                .background(colors.background),
+                .background(colors.background)
+                .onRotaryScrollEvent {
+                    coroutineScope.launch {
+                        listState.scrollBy(it.verticalScrollPixels * 2f)
+                    }
+                    true
+                }
+                .focusRequester(focusRequester)
+                .focusable(),
             state = listState,
             contentPadding = PaddingValues(horizontal = 10.dp, vertical = 40.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp)
@@ -1002,7 +857,7 @@ fun ThemeSelectionScreen(
                 )
             }
 
-            items(themes) { themeName ->
+            items(themes, key = { it }) { themeName ->
                 val isSelected = (themeName == currentTheme)
                 val colorPreview = when (themeName) {
                     "Default" -> Color(0xFFDCB17E)

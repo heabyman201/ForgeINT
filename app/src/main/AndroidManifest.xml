@@ -35,7 +35,43 @@
 
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+            <intent-filter>
+                <action android:name="com.example.forgeint.ACTION_START_VOICE_CHAT" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="com.example.forgeint.ACTION_START_TEXT_CHAT" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
         </activity>
+
+        <service
+            android:name=".presentation.LastChatTile"
+            android:label="@string/app_name"
+            android:permission="com.google.android.wearable.permission.BIND_TILE_PROVIDER"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="androidx.wear.tiles.action.BIND_TILE_PROVIDER" />
+            </intent-filter>
+
+            <meta-data
+                android:name="androidx.wear.tiles.preview"
+                android:resource="@mipmap/ic_launcher" />
+        </service>
+
+        <service
+            android:name=".presentation.HardwareTileService"
+            android:label="Server Health"
+            android:permission="com.google.android.wearable.permission.BIND_TILE_PROVIDER"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="androidx.wear.tiles.action.BIND_TILE_PROVIDER" />
+            </intent-filter>
+
+            <meta-data
+                android:name="androidx.wear.tiles.preview"
+                android:resource="@mipmap/ic_launcher" />
+        </service>
     </application>
 
 </manifest>

@@ -1,4 +1,4 @@
-package com.example.forgeint_phone.domain
+package com.example.forgeint.domain
 
 import android.content.Context
 import android.util.Log

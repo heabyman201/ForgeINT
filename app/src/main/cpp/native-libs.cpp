@@ -1,7 +1,6 @@
 #include <jni.h>
 #include <string>
-#include <vector>
-#include <cstring>
+#include <string_view>
 
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_example_forgeint_presentation_GeminiViewModel_parseStreamChunkNative(
@@ -38,24 +37,24 @@ Java_com_example_forgeint_presentation_GeminiViewModel_parseStreamChunkNative(
     cleanContent.reserve(line.length() - startPos);
 
     bool escape = false;
-    
-    // We will handle the "nn[0-9]+" artifact removal INLINE during this loop
-    // to avoid a second pass and regex overhead.
-    // State for artifact detection: 
-    // 0: normal, 1: found 'n', 2: found 'n' (so "nn"), 3: found digit (inside pattern)
-    int artifactState = 0; 
-    std::string potentialArtifact; // Buffer to hold "nn..." in case it's not a full match
+    // Lightweight artifact removal: drop "nn" followed by digits.
+    // pendingN: 0 none, 1 saw 'n', 2 saw "nn".
+    int pendingN = 0;
+    bool inArtifactDigits = false;
 
     for (size_t i = startPos; i < line.length(); ++i) {
         char c = line[i];
+    reprocess_char:
 
         if (escape) {
-            // If we were parsing a potential artifact, flush it because escape sequence breaks it
-            if (artifactState > 0) {
-                 cleanContent += potentialArtifact;
-                 artifactState = 0;
-                 potentialArtifact.clear();
+            if (pendingN == 1) {
+                cleanContent += 'n';
+            } else if (pendingN == 2) {
+                cleanContent += 'n';
+                cleanContent += 'n';
             }
+            pendingN = 0;
+            inArtifactDigits = false;
 
             switch (c) {
                 case 'n': cleanContent += '\n'; break;
@@ -70,67 +69,44 @@ Java_com_example_forgeint_presentation_GeminiViewModel_parseStreamChunkNative(
             escape = true;
         } else if (c == '"') {
              // End of JSON string value
-             // If we have a pending artifact buffer, flush it (unlikely to end with "nn123" at quote, but safe to flush)
-             if (artifactState > 0) {
-                 cleanContent += potentialArtifact;
+             if (pendingN == 1) {
+                 cleanContent += 'n';
+             } else if (pendingN == 2) {
+                 cleanContent += 'n';
+                 cleanContent += 'n';
              }
              break;
+        } else if (inArtifactDigits) {
+            // Drop digits until we hit a non-digit, then continue processing.
+            if (c < '0' || c > '9') {
+                inArtifactDigits = false;
+                goto reprocess_char;
+            }
         } else {
-            // Artifact Removal Logic: "nn[0-9]+"
-            // State machine to detect and drop "nn" followed by digits
-            
-            if (artifactState == 0) {
+            // Artifact removal: detect "nn" followed by digits.
+            if (pendingN == 0) {
                 if (c == 'n') {
-                    artifactState = 1;
-                    potentialArtifact += c;
+                    pendingN = 1;
                 } else {
                     cleanContent += c;
                 }
-            } else if (artifactState == 1) { // Found "n"
+            } else if (pendingN == 1) {
                 if (c == 'n') {
-                    artifactState = 2;
-                    potentialArtifact += c;
+                    pendingN = 2;
                 } else {
-                    // It was just one 'n' followed by something else. Flush and append current.
-                    cleanContent += potentialArtifact;
-                    cleanContent += c;
-                    artifactState = 0;
-                    potentialArtifact.clear();
+                    cleanContent += 'n';
+                    pendingN = 0;
+                    goto reprocess_char;
                 }
-            } else if (artifactState == 2) { // Found "nn"
+            } else { // pendingN == 2
                 if (c >= '0' && c <= '9') {
-                    artifactState = 3; // Entered digit phase
-                    potentialArtifact += c;
+                    inArtifactDigits = true;
+                    pendingN = 0;
                 } else {
-                    // "nn" followed by non-digit. Not an artifact. Flush.
-                    cleanContent += potentialArtifact;
-                    cleanContent += c;
-                    artifactState = 0;
-                    potentialArtifact.clear();
-                }
-            } else if (artifactState == 3) { // Found "nn[0-9]..."
-                if (c >= '0' && c <= '9') {
-                    potentialArtifact += c;
-                    // Continue consuming digits
-                } else {
-                    // End of digits. We successfully matched "nn[0-9]+". 
-                    // DROP the potentialArtifact (do nothing with it).
-                    // Reset state and process the current character 'c' normally.
-                    artifactState = 0;
-                    potentialArtifact.clear();
-                    
-                    // Re-process 'c' effectively (it's not part of the artifact)
-                    // We know 'c' is not '\', '"', or 'n' (handled by outer logic? No wait.)
-                    // We are in the 'else' block of escape and quote checks.
-                    
-                    // Wait, we need to handle if 'c' starts a NEW artifact?
-                    // "nn123n..." -> 'n' could be start of new.
-                    if (c == 'n') {
-                         artifactState = 1;
-                         potentialArtifact += c;
-                    } else {
-                         cleanContent += c;
-                    }
+                    cleanContent += 'n';
+                    cleanContent += 'n';
+                    pendingN = 0;
+                    goto reprocess_char;
                 }
             }
         }

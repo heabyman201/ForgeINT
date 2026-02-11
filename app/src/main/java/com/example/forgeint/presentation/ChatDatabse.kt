@@ -160,7 +160,7 @@ interface ChatDao {
         ConversationFts::class,
         MessageFts::class
     ],
-    version = 6
+    version = 8
 )
 abstract class ChatDatabase : RoomDatabase() {
     abstract fun chatDao(): ChatDao

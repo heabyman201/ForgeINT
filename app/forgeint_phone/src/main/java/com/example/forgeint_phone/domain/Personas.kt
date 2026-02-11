@@ -1,4 +1,4 @@
-package com.example.forgeint_phone.domain
+package com.example.forgeint.domain
 
 // In a new file, e.g., /data/Personas.kt or /presentation/Personas.kt
 
@@ -108,3 +108,4 @@ object Personas {
         return list.find { it.id == id } ?: list.first()
     }
 }
+

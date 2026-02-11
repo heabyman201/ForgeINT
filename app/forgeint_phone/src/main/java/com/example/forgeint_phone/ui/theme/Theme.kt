@@ -1,4 +1,4 @@
-package com.example.forgeint_phone.ui.theme
+package com.example.forgeint.ui.theme
 
 import android.app.Activity
 import android.os.Build
@@ -12,32 +12,40 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.platform.LocalContext
 
 private val DarkColorScheme = darkColorScheme(
-    primary = Purple80,
-    secondary = PurpleGrey80,
-    tertiary = Pink80
+    primary = Primary,
+    onPrimary = OnPrimary,
+    background = Background,
+    surface = Surface,
+    onBackground = BotText,
+    onSurface = BotText,
+    secondary = SettingsIcon,
+    tertiary = ReplyIcon,
+    primaryContainer = UserBubble,
+    onPrimaryContainer = UserText,
+    surfaceVariant = BotBubble,
+    onSurfaceVariant = BotText
 )
 
 private val LightColorScheme = lightColorScheme(
-    primary = Purple40,
-    secondary = PurpleGrey40,
-    tertiary = Pink40
-
-    /* Other default colors to override
-    background = Color(0xFFFFFBFE),
-    surface = Color(0xFFFFFBFE),
-    onPrimary = Color.White,
-    onSecondary = Color.White,
-    onTertiary = Color.White,
-    onBackground = Color(0xFF1C1B1F),
-    onSurface = Color(0xFF1C1B1F),
-    */
+    primary = Primary,
+    onPrimary = OnPrimary,
+    background = Background,
+    surface = Surface,
+    onBackground = BotText,
+    onSurface = BotText,
+    secondary = SettingsIcon,
+    tertiary = ReplyIcon,
+    primaryContainer = UserBubble,
+    onPrimaryContainer = UserText,
+    surfaceVariant = BotBubble,
+    onSurfaceVariant = BotText
 )
 
 @Composable
 fun ForgeINTTheme(
-    darkTheme: Boolean = isSystemInDarkTheme(),
+    darkTheme: Boolean = true,
     // Dynamic color is available on Android 12+
-    dynamicColor: Boolean = true,
+    dynamicColor: Boolean = false,
     content: @Composable () -> Unit
 ) {
     val colorScheme = when {

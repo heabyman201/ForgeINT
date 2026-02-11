@@ -2,6 +2,7 @@
 package com.example.forgeint.presentation
 
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.border
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.FastOutSlowInEasing
@@ -96,6 +97,10 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.rotary.onRotaryScrollEvent
+import android.speech.tts.TextToSpeech
+import android.speech.tts.UtteranceProgressListener
+import java.util.Locale
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.AnnotatedString
@@ -349,7 +354,8 @@ fun DetailedHistoryScreen(
     onDeleteClick: (Long) -> Unit,
     onNavigateToMemory: () -> Unit,
     searchQuery: String,
-    onSearchQueryChanged: (String) -> Unit
+    onSearchQueryChanged: (String) -> Unit,
+    viewModel: GeminiViewModel // Add ViewModel to access connection mode
 ) {
     val focusRequester = remember { FocusRequester() }
     val listState = rememberTransformingLazyColumnState()
@@ -408,31 +414,40 @@ fun DetailedHistoryScreen(
                         }
                     )
                 } else {
-                    Row(
+                    Column(
                         modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.Center,
-                        verticalAlignment = Alignment.CenterVertically
+                        horizontalAlignment = Alignment.CenterHorizontally
                     ) {
-                        CompactButton(
-                            onClick = { isSearchActive = true },
-                            colors = ButtonDefaults.secondaryButtonColors(),
-                            modifier = Modifier.padding(end = 2.dp)
+                        // Network Indicator at the top
+                        NetworkIndicator(viewModel = viewModel)
+                        Spacer(modifier = Modifier.height(4.dp))
+                        
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.Center,
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Icon(Icons.Default.Search, "Search", tint = Color.White)
-                        }
-                        CompactButton(
-                            onClick = onNavigateToMemory,
-                            colors = ButtonDefaults.secondaryButtonColors(),
-                            modifier = Modifier.padding(end = 2.dp)
-                        ){
-                            Icon(Icons.Default.Person, "Memory", tint = colors.primary)
-                        }
-                        CompactButton(
-                            onClick = onSettingsClick,
-                            colors = ButtonDefaults.secondaryButtonColors(),
-                            modifier = Modifier.padding(end = 2.dp)
-                        ) {
-                            Icon(Icons.Default.Settings, "Settings", tint = colors.settingsIcon)
+                            CompactButton(
+                                onClick = { isSearchActive = true },
+                                colors = ButtonDefaults.secondaryButtonColors(),
+                                modifier = Modifier.padding(end = 2.dp)
+                            ) {
+                                Icon(Icons.Default.Search, "Search", tint = Color.White)
+                            }
+                            CompactButton(
+                                onClick = onNavigateToMemory,
+                                colors = ButtonDefaults.secondaryButtonColors(),
+                                modifier = Modifier.padding(end = 2.dp)
+                            ){
+                                Icon(Icons.Default.Person, "Memory", tint = colors.primary)
+                            }
+                            CompactButton(
+                                onClick = onSettingsClick,
+                                colors = ButtonDefaults.secondaryButtonColors(),
+                                modifier = Modifier.padding(end = 2.dp)
+                            ) {
+                                Icon(Icons.Default.Settings, "Settings", tint = colors.settingsIcon)
+                            }
                         }
                     }
                 }
@@ -573,7 +588,8 @@ fun LiteHistoryScreen(
     onNewChatClick: () -> Unit,
     onChatClick: (Long) -> Unit,
     onBookmarkClick: (Long, Boolean) -> Unit,
-    onSettingsClick: () -> Unit
+    onSettingsClick: () -> Unit,
+    viewModel: GeminiViewModel
 ) {
     val listState = rememberTransformingLazyColumnState()
     val focusRequester = remember { FocusRequester() }
@@ -593,17 +609,23 @@ fun LiteHistoryScreen(
             contentPadding = PaddingValues(horizontal = 6.dp, vertical = 30.dp),
             verticalArrangement = Arrangement.spacedBy(6.dp)
         ) {
-            // Header: Small Settings Icon only
+            // Header: Network Indicator + Settings Icon
             item {
-                Box(modifier = Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
-                    Icon(
-                        imageVector = Icons.Default.Settings,
-                        contentDescription = "Settings",
-                        tint = Color.Gray,
-                        modifier = Modifier
-                            .size(24.dp)
-                            .clickable(onClick = onSettingsClick)
-                    )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Box(modifier = Modifier.weight(0.2f), contentAlignment = Alignment.Center) {
+                        Icon(
+                            imageVector = Icons.Default.Settings,
+                            contentDescription = "Settings",
+                            tint = Color.Gray,
+                            modifier = Modifier
+                                .size(24.dp)
+                                .clickable(onClick = onSettingsClick)
+                        )
+                    }
                 }
             }
 
@@ -697,28 +719,153 @@ fun DetailedChatScreen(
     currentConversationId: Long,
     isBookmarked: Boolean,
     onTryAgain: () -> Unit,
-    onWebsearchClick: () -> Unit
+    onWebsearchClick: () -> Unit,
+    isVoiceDominant: Boolean = false
 ) {
     val listState = rememberScalingLazyListState()
     val focusRequester = remember { FocusRequester() }
     val context = LocalContext.current
     val settingsManager = remember { SettingsManager(context) }
     val rawModelName by settingsManager.selectedModel.collectAsStateWithLifecycle(initialValue = "")
-    val hasStreamingText by remember(streamingMessageFlow) {
-        streamingMessageFlow.map { !it.isNullOrEmpty() }
-    }.collectAsStateWithLifecycle(initialValue = false)
+    val currentFullText by streamingMessageFlow.collectAsStateWithLifecycle(initialValue = null)
+    val hasStreamingText by remember(currentFullText) {
+        derivedStateOf { !currentFullText.isNullOrEmpty() }
+    }
     val colors = LocalForgeIntColors.current
+    var isVoiceActive by remember { mutableStateOf(false) }
+    val sentenceDelimiters = remember { charArrayOf('.', '!', '?', '\n') }
 
     val showBezelLoadingOverlay = isLoading && !hasStreamingText
+    val coroutineScope = rememberCoroutineScope()
+    val isThinking by isThinkingFlow.collectAsStateWithLifecycle()
+    
     val voiceLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.StartActivityForResult()
     ) { result ->
+        isVoiceActive = false
         if (result.resultCode == android.app.Activity.RESULT_OK) {
             val spokenText = result.data?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)?.firstOrNull()
             if (!spokenText.isNullOrEmpty()) {
                 onVoiceResult(spokenText)
             }
         }
+    }
+
+    val triggerVoiceInput = {
+        isVoiceActive = true
+        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+            putExtra(RecognizerIntent.EXTRA_PROMPT, "Speak to Assistant")
+        }
+        voiceLauncher.launch(intent)
+    }
+
+    // --- TTS Logic ---
+    val tts = remember { mutableStateOf<TextToSpeech?>(null) }
+    val isTtsReady = remember { mutableStateOf(false) }
+    var lastReadIndex by remember { mutableIntStateOf(0) }
+
+    // Keep TTS fully disabled unless voice-dominant mode is active to save battery.
+    DisposableEffect(context, isVoiceDominant) {
+        if (!isVoiceDominant) {
+            tts.value?.stop()
+            tts.value?.shutdown()
+            tts.value = null
+            isTtsReady.value = false
+            onDispose { }
+        } else {
+            val speech = TextToSpeech(context) { status ->
+                if (status == TextToSpeech.SUCCESS) {
+                    isTtsReady.value = true
+                }
+            }
+            tts.value = speech
+            onDispose {
+                speech.stop()
+                speech.shutdown()
+                tts.value = null
+                isTtsReady.value = false
+            }
+        }
+    }
+
+    // Handle TTS Progress and Auto-Mic
+    LaunchedEffect(isTtsReady.value, isVoiceDominant) {
+        if (!isVoiceDominant || !isTtsReady.value) return@LaunchedEffect
+        tts.value?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
+            override fun onStart(utteranceId: String?) {}
+            override fun onDone(utteranceId: String?) {
+                if (utteranceId == "final_segment" && isVoiceDominant) {
+                    coroutineScope.launch {
+                        delay(500)
+                        triggerVoiceInput()
+                    }
+                }
+            }
+            override fun onError(utteranceId: String?) {}
+        })
+    }
+
+    fun findLastDelimiterIndex(text: String, startIndex: Int, delimiters: CharArray): Int {
+        if (startIndex >= text.length) return -1
+        val unread = text.substring(startIndex)
+        var lastLocalIndex = -1
+        delimiters.forEach { delimiter ->
+            val idx = unread.lastIndexOf(delimiter)
+            if (idx > lastLocalIndex) lastLocalIndex = idx
+        }
+        return if (lastLocalIndex >= 0) startIndex + lastLocalIndex else -1
+    }
+
+    // Read segments during streaming
+    LaunchedEffect(currentFullText, isTtsReady.value, isVoiceDominant) {
+        if (!isVoiceDominant || !isTtsReady.value || currentFullText.isNullOrEmpty()) {
+            if (currentFullText == null && lastReadIndex > 0) {
+                lastReadIndex = 0
+            }
+            return@LaunchedEffect
+        }
+
+        val textToScan = currentFullText!!
+        val lastPunct = findLastDelimiterIndex(textToScan, lastReadIndex, sentenceDelimiters)
+
+        if (lastPunct >= lastReadIndex) {
+            val segment = textToScan.substring(lastReadIndex, lastPunct + 1).trim()
+            if (segment.isNotEmpty()) {
+                tts.value?.speak(segment, TextToSpeech.QUEUE_ADD, null, "segment_$lastReadIndex")
+                lastReadIndex = lastPunct + 1
+            }
+        }
+    }
+
+    val isStreamingObserved by remember(currentFullText) {
+        derivedStateOf { !currentFullText.isNullOrEmpty() }
+    }
+    val prevIsStreaming = remember { mutableStateOf(false) }
+    
+    // Read the final part when streaming finishes
+    LaunchedEffect(isStreamingObserved, isVoiceDominant, isTtsReady.value) {
+        if (!isVoiceDominant || !isTtsReady.value) {
+            prevIsStreaming.value = isStreamingObserved
+            return@LaunchedEffect
+        }
+
+        if (prevIsStreaming.value && !isStreamingObserved) {
+            // Streaming just finished, speak the last message's remaining text
+            val lastMsg = messages.lastOrNull()?.text ?: ""
+            val remainingText = if (lastMsg.length > lastReadIndex) lastMsg.substring(lastReadIndex).trim() else ""
+            if (remainingText.isNotEmpty()) {
+                tts.value?.speak(remainingText, TextToSpeech.QUEUE_ADD, null, "final_segment")
+            } else {
+                // Nothing left to speak, but we need to trigger mic if we didn't just speak
+                triggerVoiceInput()
+            }
+        }
+        prevIsStreaming.value = isStreamingObserved
+    }
+
+    val isStreaming by remember(currentFullText) {
+        derivedStateOf { !currentFullText.isNullOrEmpty() }
     }
 
     val displayName = remember(rawModelName) {
@@ -747,29 +894,41 @@ fun DetailedChatScreen(
             firstItem?.index == 0 && firstItem.offset >= 0
         }
     }
+    var lastLoadMoreAt by remember { mutableLongStateOf(0L) }
 
-    LaunchedEffect(reachedTop) {
+    LaunchedEffect(reachedTop, isHistoryLoading) {
         if (reachedTop && !isHistoryLoading) {
-            loadMoreMessages()
+            val now = SystemClock.elapsedRealtime()
+            if (now - lastLoadMoreAt > 800L) {
+                lastLoadMoreAt = now
+                loadMoreMessages()
+            }
         }
     }
-
-    val isStreaming by streamingMessageFlow.map { !it.isNullOrEmpty() }.collectAsStateWithLifecycle(initialValue = false)
-    val isThinking by isThinkingFlow.collectAsStateWithLifecycle()
 
     val historyOffset = if (isHistoryLoading) 1 else 0
     val bookmarkOffset = 0
     val messagesOffset = messages.size
     val streamingIndex = historyOffset + bookmarkOffset + messagesOffset
-    val replyChipIndex = streamingIndex + 1
+    val replyChipIndex = if (isVoiceDominant) streamingIndex + 1 else streamingIndex + 1
 
+    // Avoid unnecessary scroll animations to reduce work and battery drain.
+    var lastAutoScrollTarget by remember { mutableIntStateOf(-1) }
     LaunchedEffect(messages.size, isStreaming, isThinking) {
         if (messages.isNotEmpty()) {
-            if (isStreaming || isThinking) {
-                listState.animateScrollToItem(replyChipIndex, -60)
+            val target = if (isStreaming || isThinking) {
+                replyChipIndex
             } else {
-                val target = (streamingIndex - 1).coerceAtLeast(0)
-                listState.animateScrollToItem(target)
+                (streamingIndex - 1).coerceAtLeast(0)
+            }
+
+            if (target != lastAutoScrollTarget) {
+                if (isStreaming || isThinking) {
+                    listState.scrollToItem(target)
+                } else {
+                    listState.animateScrollToItem(target)
+                }
+                lastAutoScrollTarget = target
             }
         }
     }
@@ -831,7 +990,6 @@ fun DetailedChatScreen(
                             backgroundColor = Color.Black.copy(alpha = 0.5f),
                             contentColor = Color.LightGray
                         ),
-//                        modifier = Modifier.align(Alignment.CenterHorizontally)
                     )
                 }
             }
@@ -855,80 +1013,234 @@ fun DetailedChatScreen(
                 item { SystemTelemetryOverlay() }
             }
 
-            item {
-                Chip(
-                    onClick = onReplyClick,
-                    label = { Text("Reply (Keyboard)") },
-                    icon = { Icon(Icons.Default.Keyboard, "Keyboard") },
-                    colors = ChipDefaults.gradientBackgroundChipColors(
-                        startBackgroundColor = colors.replyIcon,
-                        endBackgroundColor = Color.DarkGray,
-                    ),
-                    modifier = Modifier.fillMaxWidth().padding(top = 5.dp)
-                )
-            }
-
-            item {
-                Chip(
-                    onClick = {
-                        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-                            putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-                            putExtra(RecognizerIntent.EXTRA_PROMPT, "Speak to $displayName")
+            if (isVoiceDominant) {
+                item {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 10.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        if (isVoiceActive) {
+                            VoicePulseEffect(
+                                color = colors.primary,
+                                modifier = Modifier.size(72.dp)
+                            )
                         }
-                        voiceLauncher.launch(intent)
-                    },
-                    label = { Text("Reply (Voice)") },
-                    icon = { Icon(Icons.Default.Mic, "Voice Reply") },
-                    colors = ChipDefaults.gradientBackgroundChipColors(
-                        startBackgroundColor = Color(0xFF4285F4),
-                        endBackgroundColor = Color.DarkGray,
-                    ),
-                    modifier = Modifier.fillMaxWidth()
-                )
-            }
-            item {
-                Chip(
-                    onClick = onWebsearchClick,
-                    label = { Text("Enable Websearch") },
-                    icon = { Icon(Icons.Default.Search, "Model") },
-                    colors = ChipDefaults.gradientBackgroundChipColors(
-                        startBackgroundColor = if (webEnabled.isWebEnabled.value)Color(0xFFF49542) else
-                            Color.DarkGray,
-                        endBackgroundColor = Color.DarkGray,
-                    ),
-                    modifier = Modifier.fillMaxWidth().padding(top = 5.dp)
-                )
+                        Box(
+                            modifier = Modifier
+                                .size(72.dp)
+                                .clip(CircleShape)
+                                .background(colors.primary)
+                                .clickable { triggerVoiceInput() },
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                Icons.Default.Mic,
+                                contentDescription = "Voice Input",
+                                tint = Color.Black,
+                                modifier = Modifier.size(36.dp)
+                            )
+                        }
+                    }
+                }
+                item {
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp),
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Chip(
+                            onClick = onReplyClick,
+                            label = { Text("Keyboard", style = MaterialTheme.typography.caption2, maxLines = 1) },
+                            icon = { Icon(Icons.Default.Keyboard, null, modifier = Modifier.size(16.dp)) },
+                            colors = ChipDefaults.secondaryChipColors(),
+                            modifier = Modifier.weight(1f).height(32.dp),
+                            contentPadding = PaddingValues(horizontal = 6.dp, vertical = 2.dp)
+                        )
+                        Chip(
+                            onClick = onSwapModelClick,
+                            label = { Text("Model", style = MaterialTheme.typography.caption2, maxLines = 1) },
+                            icon = { Icon(Icons.Default.AutoAwesome, null, modifier = Modifier.size(16.dp)) },
+                            colors = ChipDefaults.secondaryChipColors(),
+                            modifier = Modifier.weight(1f).height(32.dp),
+                            contentPadding = PaddingValues(horizontal = 6.dp, vertical = 2.dp)
+                        )
+                    }
+                }
+            } else {
+                item {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(top = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(43.dp)
+                                .clip(RoundedCornerShape(24.dp))
+                                .background(Color(0xFF1B1B1B))
+                                .border(
+                                    border = BorderStroke(1.dp, colors.primary.copy(alpha = 0.35f)),
+                                    shape = RoundedCornerShape(24.dp)
+                                )
+                                .clickable(onClick = onReplyClick)
+                                .padding(horizontal = 12.dp),
+                            contentAlignment = Alignment.CenterStart
+                        ) {
+                            Text(
+                                text = "Type a reply...",
+                                style = MaterialTheme.typography.caption2,
+                                color = Color(0xFFAFAFAF),
+                                maxLines = 1
+                            )
+                        }
+
+                        Box(
+                            modifier = Modifier
+                                .size(38.dp)
+                                .clip(CircleShape)
+                                .background(Color(0xFF4285F4))
+                                .clickable {
+                                    val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+                                        putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+                                        putExtra(RecognizerIntent.EXTRA_PROMPT, "Speak to $displayName")
+                                    }
+                                    voiceLauncher.launch(intent)
+                                },
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Mic,
+                                contentDescription = "Voice Reply",
+                                tint = Color.White,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
+                    }
+                }
+
+                item {
+                    Spacer(modifier = Modifier.height(14.dp))
+                }
+
+                item {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 2.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Chip(
+                            onClick = onSwapModelClick,
+                            label = { Text("Model", style = MaterialTheme.typography.caption3) },
+                            icon = { Icon(Icons.Default.AutoAwesome, "Model", modifier = Modifier.size(14.dp)) },
+                            colors = ChipDefaults.secondaryChipColors(),
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(34.dp),
+                            contentPadding = PaddingValues(horizontal = 6.dp, vertical = 2.dp)
+                        )
+                        Chip(
+                            onClick = onDeleteClick,
+                            label = { Text("Delete", style = MaterialTheme.typography.caption3) },
+                            icon = { Icon(Icons.Default.Delete, "Delete Chat", modifier = Modifier.size(14.dp)) },
+                            colors = ChipDefaults.secondaryChipColors(
+                                backgroundColor = Color(0xFF4A1111),
+                                contentColor = Color(0xFFFFB4B4)
+                            ),
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(34.dp),
+                            contentPadding = PaddingValues(horizontal = 6.dp, vertical = 2.dp)
+                        )
+                    }
+                }
             }
 
-            item {
-                Chip(
-                    onClick = onSwapModelClick,
-                    label = { Text("Change Model") },
-                    icon = { Icon(Icons.Default.AutoAwesome, "Model") },
-                    colors = ChipDefaults.gradientBackgroundChipColors(
-                        startBackgroundColor = colors.primary,
-                        endBackgroundColor = Color.DarkGray,
-                    ),
-                    modifier = Modifier.fillMaxWidth().padding(top = 5.dp)
-                )
-            }
-
-            item {
-                Chip(
-                    onClick = onDeleteClick,
-                    label = { Text("Delete Chat") },
-                    icon = { Icon(Icons.Default.Delete, "Delete Chat") },
-                    colors = ChipDefaults.gradientBackgroundChipColors(
-                        startBackgroundColor = Color.Red,
-                        endBackgroundColor = Color.DarkGray,
-                    ),
-                    modifier = Modifier.fillMaxWidth().padding(top = 5.dp)
-                )
+            if (isVoiceDominant) {
+                item {
+                    Chip(
+                        onClick = onDeleteClick,
+                        label = { Text("Delete Chat") },
+                        icon = { Icon(Icons.Default.Delete, "Delete Chat") },
+                        colors = ChipDefaults.gradientBackgroundChipColors(
+                            startBackgroundColor = Color.Red,
+                            endBackgroundColor = Color.DarkGray,
+                        ),
+                        modifier = Modifier.fillMaxWidth().padding(top = 5.dp)
+                    )
+                }
             }
         }
     }
     if (showBezelLoadingOverlay) {
         GeminiBezelLoadingIndicator()
+    }
+}
+
+@Composable
+fun VoicePulseEffect(
+    color: Color,
+    modifier: Modifier = Modifier
+) {
+    val infiniteTransition = rememberInfiniteTransition(label = "VoicePulse")
+    val pulse1 = infiniteTransition.animateFloat(
+        initialValue = 1f,
+        targetValue = 2f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(1500, easing = LinearEasing),
+            repeatMode = RepeatMode.Restart
+        ),
+        label = "Pulse1"
+    )
+    val alpha1 = infiniteTransition.animateFloat(
+        initialValue = 0.6f,
+        targetValue = 0f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(1500, easing = LinearEasing),
+            repeatMode = RepeatMode.Restart
+        ),
+        label = "Alpha1"
+    )
+
+    val pulse2 = infiniteTransition.animateFloat(
+        initialValue = 1f,
+        targetValue = 2f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(1500, delayMillis = 750, easing = LinearEasing),
+            repeatMode = RepeatMode.Restart
+        ),
+        label = "Pulse2"
+    )
+    val alpha2 = infiniteTransition.animateFloat(
+        initialValue = 0.6f,
+        targetValue = 0f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(1500, delayMillis = 750, easing = LinearEasing),
+            repeatMode = RepeatMode.Restart
+        ),
+        label = "Alpha2"
+    )
+
+    Canvas(modifier = modifier) {
+        val baseRadius = size.minDimension / 2f
+        
+        drawCircle(
+            color = color,
+            radius = baseRadius * pulse1.value,
+            alpha = alpha1.value,
+            style = Stroke(width = 2.dp.toPx())
+        )
+        
+        drawCircle(
+            color = color,
+            radius = baseRadius * pulse2.value,
+            alpha = alpha2.value,
+            style = Stroke(width = 2.dp.toPx())
+        )
     }
 }
 
@@ -941,7 +1253,7 @@ fun OrbitalThinkingIndicator() {
         animationSpec = infiniteRepeatable(tween(2000, easing = LinearEasing))
     )
 
-    Canvas(modifier = Modifier.fillMaxSize().padding(2.dp)) {
+    Canvas(modifier = Modifier.size(24.dp).padding(2.dp)) {
         drawArc(
             color = Color.Cyan,
             startAngle = angle,
@@ -964,16 +1276,6 @@ fun GeminiBezelLoadingIndicator() {
         label = "Rotation"
     )
 
-    val pulse by transition.animateFloat(
-        initialValue = 4f,
-        targetValue = 10f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(1200, easing = FastOutSlowInEasing),
-            repeatMode = RepeatMode.Reverse
-        ),
-        label = "GlowPulse"
-    )
-
     val colors = LocalForgeIntColors.current
     val background = colors.background.toArgb()
     val primary = colors.primary.toArgb()
@@ -985,8 +1287,6 @@ fun GeminiBezelLoadingIndicator() {
             .rotate(rotation)
     ) {
         val strokeWidth = 4.dp.toPx()
-        val glowRadius = pulse.dp.toPx()
-
         // Sticky Logic: Inset by half the stroke width so the outer edge hits the bezel
         val stickyPadding = strokeWidth / 2f
 
@@ -1004,16 +1304,8 @@ fun GeminiBezelLoadingIndicator() {
                 )
             }
 
-            // Glow Pass (The "Halo" sticking to the edge)
-            paint.maskFilter = BlurMaskFilter(glowRadius, BlurMaskFilter.Blur.NORMAL)
-            canvas.nativeCanvas.drawArc(
-                stickyPadding, stickyPadding,
-                size.width - stickyPadding, size.height - stickyPadding,
-                0f, 290f, false, paint
-            )
-
-            // Core Pass (The sharp line)
-            paint.maskFilter = null
+            // Core Pass (The sharp line - cheap and efficient)
+            // Removed BlurMaskFilter for battery optimization
             canvas.nativeCanvas.drawArc(
                 stickyPadding, stickyPadding,
                 size.width - stickyPadding, size.height - stickyPadding,
@@ -1056,7 +1348,7 @@ fun StreamingMessageCard(
     val formattedText by remember(rawText, userTextColor) {
         derivedStateOf {
             val text = rawText ?: ""
-            RichTextFormatter.format(text + " ▋", userTextColor)
+            RichTextFormatter.format(text + " ▋", userTextColor, fastMode = true)
         }
     }
 
@@ -1293,7 +1585,7 @@ private fun StreamingCanvasBubble(
                             text.contains("Exception", ignoreCase = true) ||
                             text.contains("failed", ignoreCase = true)
                     if (isError) android.util.Log.d("StreamDebug", "Keyword Match Found!")
-                    val formatted = RichTextFormatter.format(text + " ▋", textColor)
+                    val formatted = RichTextFormatter.format(text + " ▋", textColor, fastMode = true)
 
                     withContext(Dispatchers.Main) {
                         value = formatted
@@ -1456,13 +1748,114 @@ fun MessageCard(
 @Composable
 fun LiteChatScreen(
     messages: List<Message>,
+    streamingMessageFlow: StateFlow<String?>,
     isTyping: Boolean = false,
+    isVoiceDominant: Boolean = false,
     onReplyClick: () -> Unit,
     onDeleteClick: () -> Unit,
-    onSwapModelClick: () -> Unit
+    onSwapModelClick: () -> Unit,
+    onVoiceResult: (String) -> Unit = {}
 ) {
     val listState = rememberScalingLazyListState()
     val colors = LocalForgeIntColors.current
+    val context = LocalContext.current
+    val coroutineScope = rememberCoroutineScope()
+    var isVoiceActive by remember { mutableStateOf(false) }
+
+    val voiceLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        isVoiceActive = false
+        if (result.resultCode == android.app.Activity.RESULT_OK) {
+            val spokenText = result.data?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)?.firstOrNull()
+            if (!spokenText.isNullOrEmpty()) {
+                onVoiceResult(spokenText)
+            }
+        }
+    }
+
+    val triggerVoiceInput = {
+        isVoiceActive = true
+        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+            putExtra(RecognizerIntent.EXTRA_PROMPT, "Speak...")
+        }
+        voiceLauncher.launch(intent)
+    }
+
+    // --- TTS Logic ---
+    val tts = remember { mutableStateOf<TextToSpeech?>(null) }
+    val isTtsReady = remember { mutableStateOf(false) }
+    var lastReadIndex by remember { mutableIntStateOf(0) }
+    val currentFullText by streamingMessageFlow.collectAsStateWithLifecycle()
+
+    DisposableEffect(context) {
+        val speech = TextToSpeech(context) { status ->
+            if (status == TextToSpeech.SUCCESS) {
+                isTtsReady.value = true
+            }
+        }
+        tts.value = speech
+        onDispose {
+            speech.stop()
+            speech.shutdown()
+        }
+    }
+
+    LaunchedEffect(isTtsReady.value) {
+        if (isTtsReady.value) {
+            tts.value?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
+                override fun onStart(utteranceId: String?) {}
+                override fun onDone(utteranceId: String?) {
+                    if (utteranceId == "final_segment" && isVoiceDominant) {
+                        coroutineScope.launch {
+                            delay(500)
+                            triggerVoiceInput()
+                        }
+                    }
+                }
+                override fun onError(utteranceId: String?) {}
+            })
+        }
+    }
+
+    LaunchedEffect(currentFullText, isTtsReady.value) {
+        if (isVoiceDominant && isTtsReady.value && !currentFullText.isNullOrEmpty()) {
+            val textToScan = currentFullText!!
+            val delimiters = listOf('.', '!', '?', '\n')
+            var lastPunct = -1
+            for (d in delimiters) {
+                val idx = textToScan.lastIndexOf(d)
+                if (idx > lastPunct) lastPunct = idx
+            }
+
+            if (lastPunct >= lastReadIndex) {
+                val segment = textToScan.substring(lastReadIndex, lastPunct + 1).trim()
+                if (segment.isNotEmpty()) {
+                    tts.value?.speak(segment, TextToSpeech.QUEUE_ADD, null, "segment_$lastReadIndex")
+                    lastReadIndex = lastPunct + 1
+                }
+            }
+        } else if (currentFullText == null && lastReadIndex > 0) {
+            lastReadIndex = 0
+        }
+    }
+
+    val isStreamingObserved by streamingMessageFlow.map { !it.isNullOrEmpty() }.collectAsStateWithLifecycle(initialValue = false)
+    val prevIsStreaming = remember { mutableStateOf(false) }
+    
+    LaunchedEffect(isStreamingObserved) {
+        if (prevIsStreaming.value && !isStreamingObserved && isVoiceDominant && isTtsReady.value) {
+            val lastMsg = messages.lastOrNull()?.text ?: ""
+            val remainingText = if (lastMsg.length > lastReadIndex) lastMsg.substring(lastReadIndex).trim() else ""
+            if (remainingText.isNotEmpty()) {
+                tts.value?.speak(remainingText, TextToSpeech.QUEUE_ADD, null, "final_segment")
+            } else {
+                triggerVoiceInput()
+            }
+        }
+        prevIsStreaming.value = isStreamingObserved
+    }
 
     LaunchedEffect(messages.size, isTyping) {
         if (messages.isNotEmpty() || isTyping) {
@@ -1559,39 +1952,108 @@ fun LiteChatScreen(
                 }
             }
 
-            item {
+            if (isVoiceDominant) {
+                item {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 8.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        if (isVoiceActive) {
+                            VoicePulseEffect(
+                                color = colors.primary,
+                                modifier = Modifier.size(64.dp)
+                            )
+                        }
+                        Box(
+                            modifier = Modifier
+                                .size(64.dp)
+                                .clip(CircleShape)
+                                .background(colors.primary)
+                                .clickable { triggerVoiceInput() },
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                Icons.Default.Mic,
+                                contentDescription = "Voice Input",
+                                tint = Color.Black,
+                                modifier = Modifier.size(32.dp)
+                            )
+                        }
+                    }
+                }
+                item {
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp),
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(32.dp)
+                                .clip(CircleShape)
+                                .background(colors.replyIcon)
+                                .clickable(onClick = onReplyClick),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.Center
+                        ) {
+                            Icon(Icons.Default.Keyboard, null, tint = Color.Black, modifier = Modifier.size(14.dp))
+                            Spacer(Modifier.width(2.dp))
+                            Text("Keyboard", color = Color.Black, style = MaterialTheme.typography.caption2, maxLines = 1)
+                        }
+                        Row(
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(32.dp)
+                                .clip(CircleShape)
+                                .background(colors.primary)
+                                .clickable(onClick = onSwapModelClick),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.Center
+                        ) {
+                            Icon(Icons.Default.AutoAwesome, null, tint = Color.Black, modifier = Modifier.size(14.dp))
+                            Spacer(Modifier.width(2.dp))
+                            Text("Model", color = Color.Black, style = MaterialTheme.typography.caption2, maxLines = 1)
+                        }
+                    }
+                }
+            } else {
+                item {
 
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(40.dp)
-                        .clip(CircleShape)
-                        .background(colors.replyIcon)
-                        .clickable(onClick = onReplyClick),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.Center
-                ) {
-                    Icon(Icons.Default.Keyboard, null, tint = Color.Black)
-                    Spacer(Modifier.width(6.dp))
-                    Text("Reply", color = Color.Black, style = MaterialTheme.typography.button)
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(40.dp)
+                            .clip(CircleShape)
+                            .background(colors.replyIcon)
+                            .clickable(onClick = onReplyClick),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.Center
+                    ) {
+                        Icon(Icons.Default.Keyboard, null, tint = Color.Black)
+                        Spacer(Modifier.width(6.dp))
+                        Text("Reply", color = Color.Black, style = MaterialTheme.typography.button)
+                    }
+                }
+                item {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(40.dp)
+                            .clip(CircleShape)
+                            .background(colors.primary)
+                            .clickable(onClick = onSwapModelClick),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.Center
+                    ) {
+                        Icon(Icons.Default.AutoAwesome, null, tint = Color.Black)
+                        Spacer(Modifier.width(6.dp))
+                        Text("Change Model", color = Color.Black, style = MaterialTheme.typography.button)
+                    }
                 }
             }
-            item {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(40.dp)
-                        .clip(CircleShape)
-                        .background(colors.primary)
-                        .clickable(onClick = onSwapModelClick),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.Center
-                ) {
-                    Icon(Icons.Default.AutoAwesome, null, tint = Color.Black)
-                    Spacer(Modifier.width(6.dp))
-                    Text("Change Model", color = Color.Black, style = MaterialTheme.typography.button)
-                }
-            }
+
             item {
 
                 Row(
@@ -1779,6 +2241,19 @@ fun ConnectionSettingsScreen(
         }
     }
 }
+@Composable
+fun LocalServerStatus(){
+
+    val listState = rememberScalingLazyListState()
+    Scaffold(
+        timeText = { TimeText() },
+        vignette = { Vignette(vignettePosition = VignettePosition.TopAndBottom) },
+        positionIndicator = { PositionIndicator(scalingLazyListState = listState) }
+
+    ) {
+
+    }
+}
 
 
 @Composable
@@ -1879,21 +2354,40 @@ fun NeuralSlider(
 @Composable
 fun MemoryManagementScreen(
     traits: List<UserTrait>,
-    onDeleteTrait: (String) -> Unit, // Pass the traitKey
+    onDeleteTrait: (Int) -> Unit, // Pass the ID
+    onAddManualMemory: (String, MemoryType) -> Unit,
     onClearAll: () -> Unit
 ) {
     val listState = rememberScalingLazyListState()
     val focusRequester = remember { FocusRequester() }
     val colors = LocalForgeIntColors.current
 
-    // Group traits by category for a cleaner "Database" look
-    val groupedTraits = remember(traits) {
-        traits.groupBy { it.category }
+    val addLongTermLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        val results = RemoteInput.getResultsFromIntent(result.data)
+        val text = results?.getCharSequence("manual_ltm_input")?.toString()?.trim()
+        if (!text.isNullOrBlank()) {
+            onAddManualMemory(text, MemoryType.LONG_TERM)
+        }
+    }
+
+    val addShortTermLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        val results = RemoteInput.getResultsFromIntent(result.data)
+        val text = results?.getCharSequence("manual_stm_input")?.toString()?.trim()
+        if (!text.isNullOrBlank()) {
+            onAddManualMemory(text, MemoryType.SHORT_TERM)
+        }
     }
 
     LaunchedEffect(Unit) {
         focusRequester.requestFocus()
     }
+
+    val ltm = remember(traits) { traits.filter { it.type == MemoryType.LONG_TERM } }
+    val stm = remember(traits) { traits.filter { it.type == MemoryType.SHORT_TERM } }
 
     Scaffold(
         timeText = { TimeText() },
@@ -1913,45 +2407,124 @@ fun MemoryManagementScreen(
             item {
                 ListHeader {
                     Text(
-                        "Personal Memory",
+                        "Manual Add",
                         color = colors.primary,
                         style = MaterialTheme.typography.caption2,
-                        fontFamily = FontFamily.Default,
-                        modifier = Modifier.padding(bottom = 8.dp)
+                        fontWeight = FontWeight.Bold
                     )
                 }
             }
 
-            if (traits.isEmpty()) {
+            item {
+                Chip(
+                    onClick = {
+                        val intent: Intent = RemoteInputIntentHelper.createActionRemoteInputIntent()
+                        val remoteInputs = listOf(
+                            RemoteInput.Builder("manual_ltm_input")
+                                .setLabel("Long-term fact to save")
+                                .setAllowFreeFormInput(true)
+                                .build()
+                        )
+                        RemoteInputIntentHelper.putRemoteInputsExtra(intent, remoteInputs)
+                        addLongTermLauncher.launch(intent)
+                    },
+                    label = { Text("Add Long-Term") },
+                    secondaryLabel = { Text("Save exact fact") },
+                    icon = { Icon(Icons.Rounded.Add, "Add LTM") },
+                    colors = ChipDefaults.secondaryChipColors(),
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+
+            item {
+                Chip(
+                    onClick = {
+                        val intent: Intent = RemoteInputIntentHelper.createActionRemoteInputIntent()
+                        val remoteInputs = listOf(
+                            RemoteInput.Builder("manual_stm_input")
+                                .setLabel("Short-term context to save")
+                                .setAllowFreeFormInput(true)
+                                .build()
+                        )
+                        RemoteInputIntentHelper.putRemoteInputsExtra(intent, remoteInputs)
+                        addShortTermLauncher.launch(intent)
+                    },
+                    label = { Text("Add Short-Term") },
+                    secondaryLabel = { Text("Save temporary context") },
+                    icon = { Icon(Icons.Rounded.Add, "Add STM") },
+                    colors = ChipDefaults.secondaryChipColors(),
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+
+            item {
+                Spacer(modifier = Modifier.height(6.dp))
+            }
+
+            // --- Long-Term Memory Section ---
+            item {
+                ListHeader {
+                    Text(
+                        "Long-Term Memory",
+                        color = colors.primary,
+                        style = MaterialTheme.typography.caption2,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            }
+
+            if (ltm.isEmpty()) {
                 item {
                     Text(
-                        "No permanent data stored.\nTalk to the AI to build memory.",
+                        "No long-term facts stored.",
                         style = MaterialTheme.typography.body2,
                         color = Color.Gray,
                         textAlign = TextAlign.Center,
-                        modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp)
+                        modifier = Modifier.fillMaxWidth()
                     )
                 }
             } else {
-                // Iterate through groups
-                groupedTraits.forEach { (category, traitsInCategory) ->
-                    item {
-                        Text(
-                            text = "[$category]",
-                            style = MaterialTheme.typography.caption2,
-                            color = colors.settingsIcon,
-                            modifier = Modifier.padding(start = 12.dp, top = 4.dp)
-                        )
-                    }
-
-                    items(traitsInCategory, key = { it.traitKey }) { trait ->
-                        MemoryTraitRow(
-                            trait = trait,
-                            onDelete = { onDeleteTrait(trait.traitKey) }
-                        )
-                    }
+                items(ltm, key = { it.id }) { trait ->
+                    MemoryTraitRow(
+                        trait = trait,
+                        onDelete = { onDeleteTrait(trait.id) }
+                    )
                 }
+            }
 
+            // --- Short-Term Memory Section ---
+            item {
+                ListHeader {
+                    Text(
+                        "Short-Term Memory",
+                        color = ColorLiteAccent,
+                        style = MaterialTheme.typography.caption2,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.padding(top = 10.dp)
+                    )
+                }
+            }
+
+            if (stm.isEmpty()) {
+                item {
+                    Text(
+                        "No short-term context stored.",
+                        style = MaterialTheme.typography.body2,
+                        color = Color.Gray,
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+            } else {
+                items(stm, key = { it.id }) { trait ->
+                    MemoryTraitRow(
+                        trait = trait,
+                        onDelete = { onDeleteTrait(trait.id) }
+                    )
+                }
+            }
+
+            if (traits.isNotEmpty()) {
                 item {
                     Spacer(modifier = Modifier.height(10.dp))
                 }
@@ -1959,7 +2532,7 @@ fun MemoryManagementScreen(
                 item {
                     Chip(
                         onClick = onClearAll,
-                        label = { Text("Format Memory") },
+                        label = { Text("Clear All Memories") },
                         icon = { Icon(Icons.Default.Delete, "Wipe") },
                         colors = ChipDefaults.gradientBackgroundChipColors(
                             startBackgroundColor = Color(0xFFB71C1C),
@@ -1982,18 +2555,6 @@ fun MemoryTraitRow(
     val haptic = LocalHapticFeedback.current
     val colors = LocalForgeIntColors.current
 
-    // Reuse animation logic from ChatItemRow
-    val animatedAlpha by animateFloatAsState(
-        targetValue = if (isDeleting) 0f else 1f,
-        animationSpec = tween(durationMillis = 500),
-        label = "alpha"
-    )
-    val animatedScale by animateFloatAsState(
-        targetValue = if (isDeleting) 0.8f else 1f,
-        animationSpec = tween(durationMillis = 500),
-        label = "scale"
-    )
-
     LaunchedEffect(isDeleting) {
         if (isDeleting) {
             delay(500)
@@ -2001,58 +2562,54 @@ fun MemoryTraitRow(
         }
     }
 
+    val animatedAlpha by animateFloatAsState(if (isDeleting) 0f else 1f, label = "alpha")
+
     Box(
         modifier = Modifier
             .fillMaxWidth()
-            .graphicsLayer {
-                alpha = animatedAlpha
-                scaleX = animatedScale
-                scaleY = animatedScale
-            }
+            .graphicsLayer { alpha = animatedAlpha }
     ) {
-        TitleCard(
-            backgroundPainter = CardDefaults.cardBackgroundPainter(
-                startBackgroundColor = if (isDeleting) Color(0xFFD32F2F) else colors.userBubble,
-                endBackgroundColor = if (isDeleting) Color(0xFFB71C1C) else colors.userBubble
-            ),
-            contentColor = if (isDeleting) Color.White else Color.Black,
+        Card(
             onClick = { },
-            title = {
+            modifier = Modifier.fillMaxWidth(),
+            backgroundPainter = CardDefaults.cardBackgroundPainter(
+                startBackgroundColor = colors.surface,
+                endBackgroundColor = colors.surface
+            ),
+            contentColor = colors.onPrimary
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.fillMaxWidth()
+            ) {
                 Text(
-                    text = trait.traitKey.uppercase(),
-                    color = if (isDeleting) Color.White else colors.primary,
-                    style = MaterialTheme.typography.caption2,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-            },
-            content = {
-                Text(
-                    text = if (isDeleting) "Deleting node..." else trait.traitValue,
-                    color = if (isDeleting) Color.White.copy(alpha = 0.7f) else Color.LightGray,
+                    text = trait.content,
                     style = MaterialTheme.typography.body2,
-                    maxLines = 3,
-                    overflow = TextOverflow.Ellipsis
+                    color = colors.userText,
+                    modifier = Modifier.weight(1f).padding(end = 8.dp)
                 )
-            },
-            modifier = Modifier.fillMaxWidth()
-        )
 
-        // Long Press to Delete Overlay
-        Box(
-            modifier = Modifier
-                .matchParentSize()
-                .clip(RoundedCornerShape(24.dp))
-                .combinedClickable(
-                    onClick = { /* Could open detail view if needed */ },
-                    onLongClick = {
+                IconButton(
+                    onClick = {
                         isDeleting = true
                         haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                    }
-                )
-        )
+                    },
+                    modifier = Modifier.size(32.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Close,
+                        contentDescription = "Forget",
+                        tint = Color.Gray
+                    )
+                }
+            }
+        }
     }
+
+
 }
+
+
 object convoID {
     var conID = mutableStateOf(0)
     var condBK = mutableStateOf(false)

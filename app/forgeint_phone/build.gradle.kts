@@ -6,13 +6,13 @@ plugins {
 }
 
 android {
-    namespace = "com.example.forgeint_phone"
+    namespace = "com.example.forgeint"
     compileSdk {
         version = release(36)
     }
 
     defaultConfig {
-        applicationId = "com.example.forgeint_phone"
+        applicationId = "com.example.forgeint"
         minSdk = 30
         targetSdk = 36
         versionCode = 1
@@ -86,4 +86,5 @@ dependencies {
     implementation("androidx.datastore:datastore-preferences:1.2.0")
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.0")
     implementation("com.google.accompanist:accompanist-navigation-animation:0.32.0")
+    implementation("com.google.android.gms:play-services-wearable:18.1.0")
 }

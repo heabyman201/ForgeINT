@@ -1,4 +1,4 @@
-package com.example.forgeint_phone
+package com.example.forgeint
 
 import org.junit.Test
 
