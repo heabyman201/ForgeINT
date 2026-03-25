@@ -4,6 +4,7 @@ import android.app.Application
 import android.os.SystemClock
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.forgeint.BuildConfig
 import com.example.weargemini.data.SettingsManager
 import com.google.gson.Gson
 import com.google.gson.annotations.SerializedName
@@ -223,8 +224,6 @@ class GeminiViewModel(application: Application) : AndroidViewModel(application) 
         _pendingPcAction.value = null
     }
 
-    private val openRouterKey = "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"
-    private val tavilyApiKey = "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"
     private val embeddingModelId = "text-embedding-qwen3-embedding-0.6b"
 
     private val fallbackEmbeddingDim = 256
@@ -1018,7 +1017,7 @@ class GeminiViewModel(application: Application) : AndroidViewModel(application) 
                     url = buildLocalUrl("/v1/chat/completions")
                     headers = buildLocalHeaders()
                 } else {
-                    val currentKey = if (isCustomApiKeyEnabled.value && apiKey.value.isNotBlank()) apiKey.value else openRouterKey
+                    val currentKey = requireOpenRouterKey()
                     url = "https://openrouter.ai/api/v1/chat/completions"
                     headers = mapOf("Authorization" to "Bearer $currentKey", "HTTP-Referer" to "https://forgeint.app", "X-Title" to "ForgeInt")
                 }
@@ -1052,7 +1051,7 @@ class GeminiViewModel(application: Application) : AndroidViewModel(application) 
                 android.util.Log.d("MemoryDebug", "Raw Local/Cloud Response: $content")
                 content
             } else if (!isLocalEnabled.value) {
-                val currentKey = if (isCustomApiKeyEnabled.value && apiKey.value.isNotBlank()) apiKey.value else openRouterKey
+                val currentKey = requireOpenRouterKey()
                 val response = apiService.chatOpenRouterBlocking(
                     "Bearer $currentKey",
                     "https://forgeint.app",
@@ -1611,7 +1610,7 @@ class GeminiViewModel(application: Application) : AndroidViewModel(application) 
                         )
                         parseEmbeddingFromJson(phoneCommunicator.sendRequest(rr))
                     } else {
-                        val currentKey = if (isCustomApiKeyEnabled.value && apiKey.value.isNotBlank()) apiKey.value else openRouterKey
+                        val currentKey = requireOpenRouterKey()
                         val rr = com.example.forgeint.RemoteRequest(
                             url = "https://openrouter.ai/api/v1/embeddings",
                             method = "POST",
@@ -1633,7 +1632,7 @@ class GeminiViewModel(application: Application) : AndroidViewModel(application) 
                     ).data.firstOrNull()?.embedding?.map { it.toFloat() }?.toFloatArray()
                 }
                 else -> {
-                    val currentKey = if (isCustomApiKeyEnabled.value && apiKey.value.isNotBlank()) apiKey.value else openRouterKey
+                    val currentKey = requireOpenRouterKey()
                     apiService.embeddingsOpenRouter(
                         "Bearer $currentKey",
                         "https://forgeint.app",
@@ -1683,13 +1682,11 @@ class GeminiViewModel(application: Application) : AndroidViewModel(application) 
 
     private suspend fun performWebSearch(query: String): String {
         return withContext(Dispatchers.IO) {
-            val key = tavilyApiKey.trim()
-            val keyConfigured = key.startsWith("tvly-") &&
-                !key.contains("REPLACE_WITH_YOUR_TAVILY_API_KEY", ignoreCase = true)
-            if (!keyConfigured) {
+            val key = resolveTavilyApiKey()
+            if (key == null) {
                 return@withContext performDuckDuckGoSearch(
                     query,
-                    priorError = "Tavily API key missing. Set tavilyApiKey in GeminiViewModel."
+                    priorError = "Tavily API key missing. Add TAVILY_API_KEY to local.properties."
                 )
             }
             performTavilySearch(query, key)
@@ -1915,7 +1912,7 @@ class GeminiViewModel(application: Application) : AndroidViewModel(application) 
             }
         } else {
             if (connectionMode.value == ConnectionMode.Phone) {
-                val currentKey = if (isCustomApiKeyEnabled.value && apiKey.value.isNotBlank()) apiKey.value else openRouterKey
+                val currentKey = requireOpenRouterKey()
                 val headers = mapOf(
                     "Authorization" to "Bearer $currentKey",
                     "HTTP-Referer" to "https://forgeint.app",
@@ -1934,7 +1931,7 @@ class GeminiViewModel(application: Application) : AndroidViewModel(application) 
                     null
                 } else null
             } else {
-                val currentKey = if (isCustomApiKeyEnabled.value && apiKey.value.isNotBlank()) apiKey.value else openRouterKey
+                val currentKey = requireOpenRouterKey()
                 apiService.chatOpenRouterBlocking(
                     "Bearer $currentKey",
                     "https://forgeint.app",
@@ -2171,7 +2168,7 @@ class GeminiViewModel(application: Application) : AndroidViewModel(application) 
                         .choices.firstOrNull()?.message?.content
                 }
             } else {
-                val currentKey = if (isCustomApiKeyEnabled.value && apiKey.value.isNotBlank()) apiKey.value else openRouterKey
+                val currentKey = requireOpenRouterKey()
                 if (connectionMode.value == ConnectionMode.Phone) {
                     val headers = mapOf(
                         "Authorization" to "Bearer $currentKey",
@@ -2315,7 +2312,7 @@ class GeminiViewModel(application: Application) : AndroidViewModel(application) 
                     apiService.chatLocalBlocking(urlString, headers, request)
                 }
             } else {
-                val currentKey = if (isCustomApiKeyEnabled.value && apiKey.value.isNotBlank()) apiKey.value else openRouterKey
+                val currentKey = requireOpenRouterKey()
                 if (connectionMode.value == ConnectionMode.Phone) {
                     val headers = mapOf(
                         "Authorization" to "Bearer $currentKey",
@@ -2384,7 +2381,7 @@ class GeminiViewModel(application: Application) : AndroidViewModel(application) 
     private suspend fun callOpenRouterStream(messages: List<ApiMessage>, modelId: String, maxTokens: Int): String? {
         val request = ChatRequest(model = modelId, messages = messages, stream = true,
             max_tokens = maxTokens)
-        val currentKey = if (isCustomApiKeyEnabled.value && apiKey.value.isNotBlank()) apiKey.value else openRouterKey
+        val currentKey = requireOpenRouterKey()
 
         if (connectionMode.value == ConnectionMode.Phone) {
             val gson = Gson()
@@ -2413,6 +2410,25 @@ class GeminiViewModel(application: Application) : AndroidViewModel(application) 
             request
         )
         return processStream(responseBody)
+    }
+
+    private fun requireOpenRouterKey(): String {
+        val customKey = apiKey.value.trim().takeIf {
+            isCustomApiKeyEnabled.value && it.isNotBlank()
+        }
+        val bundledKey = BuildConfig.OPENROUTER_API_KEY.trim().takeIf { it.isNotBlank() }
+        return customKey ?: bundledKey
+            ?: throw IllegalStateException(
+                "OpenRouter API key missing. Add OPENROUTER_API_KEY to local.properties or enter a custom key in Settings."
+            )
+    }
+
+    private fun resolveTavilyApiKey(): String? {
+        val key = BuildConfig.TAVILY_API_KEY.trim()
+        return key.takeIf {
+            it.startsWith("tvly-") &&
+                !it.contains("REPLACE_WITH_YOUR_TAVILY_API_KEY", ignoreCase = true)
+        }
     }
 
     private suspend fun processStream(responseBody: ResponseBody): String {

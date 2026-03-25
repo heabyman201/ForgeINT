@@ -1,3 +1,5 @@
+import java.util.Properties
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
@@ -6,6 +8,19 @@ plugins {
     id("com.google.gms.google-services")
     id("com.google.firebase.firebase-perf")
 
+}
+
+val localProperties = Properties().apply {
+    val file = rootProject.file("local.properties")
+    if (file.exists()) {
+        file.inputStream().use(::load)
+    }
+}
+
+fun readSecret(name: String): String {
+    return (localProperties.getProperty(name) ?: providers.gradleProperty(name).orNull ?: "")
+        .replace("\\", "\\\\")
+        .replace("\"", "\\\"")
 }
 
 android {
@@ -30,7 +45,9 @@ android {
                 "x86_64"
             )
         }
-        buildConfigField("String", "GEMINI_API_KEY", "\"${project.findProperty("GEMINI_API_KEY")}\"")
+        buildConfigField("String", "OPENROUTER_API_KEY", "\"${readSecret("OPENROUTER_API_KEY")}\"")
+        buildConfigField("String", "TAVILY_API_KEY", "\"${readSecret("TAVILY_API_KEY")}\"")
+        buildConfigField("String", "HUGGING_FACE_TOKEN", "\"${readSecret("HUGGING_FACE_TOKEN")}\"")
         externalNativeBuild {
             cmake {
                 cppFlags("-std=c++17")

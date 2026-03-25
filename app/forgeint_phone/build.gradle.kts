@@ -1,8 +1,23 @@
+import java.util.Properties
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
     alias(libs.plugins.kotlin.compose)
     id("com.google.devtools.ksp")
+}
+
+val localProperties = Properties().apply {
+    val file = rootProject.file("local.properties")
+    if (file.exists()) {
+        file.inputStream().use(::load)
+    }
+}
+
+fun readSecret(name: String): String {
+    return (localProperties.getProperty(name) ?: providers.gradleProperty(name).orNull ?: "")
+        .replace("\\", "\\\\")
+        .replace("\"", "\\\"")
 }
 
 android {
@@ -19,6 +34,9 @@ android {
         versionName = "1.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        buildConfigField("String", "OPENROUTER_API_KEY", "\"${readSecret("OPENROUTER_API_KEY")}\"")
+        buildConfigField("String", "TAVILY_API_KEY", "\"${readSecret("TAVILY_API_KEY")}\"")
+        buildConfigField("String", "HUGGING_FACE_TOKEN", "\"${readSecret("HUGGING_FACE_TOKEN")}\"")
         externalNativeBuild {
             cmake {
                 cppFlags("-std=c++17 -fexceptions -frtti")
@@ -52,6 +70,7 @@ android {
         }
     }
     buildFeatures {
+        buildConfig = true
         compose = true
     }
 }

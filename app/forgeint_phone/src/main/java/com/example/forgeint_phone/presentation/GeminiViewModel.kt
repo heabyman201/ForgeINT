@@ -4,6 +4,7 @@ import android.app.Application
 import android.os.SystemClock
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.forgeint.BuildConfig
 import com.example.forgeint.data.SettingsManager
 import com.google.gson.Gson
 import com.google.gson.annotations.SerializedName
@@ -188,8 +189,6 @@ class GeminiViewModel(application: Application) : AndroidViewModel(application) 
     private val localEngine = LocalInferenceEngine(application)
     private var isModelLoaded = false
 
-    private val openRouterKey = "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"
-    private val huggingFaceToken = "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"
     private val embeddingModelId = "text-embedding-qwen3-embedding-0.6b"
     private val fallbackEmbeddingDim = 256
     private var pendingAttachmentsForNextSend: List<ChatAttachment> = emptyList()
@@ -564,7 +563,7 @@ fun toggleMemoryMonitor() {
             try {
                 val request = Request.Builder()
                     .url(modelUrl)
-                    .header("Authorization", "Bearer $huggingFaceToken")
+                    .header("Authorization", "Bearer ${requireHuggingFaceToken()}")
                     .build()
 
                 val response = downloadHttpClient.newCall(request).execute()
@@ -1470,11 +1469,21 @@ fun toggleMemoryMonitor() {
     }
 
     private fun resolveOpenRouterKey(): String {
-        return if (isCustomApiKeyEnabled.value && apiKey.value.isNotBlank()) {
-            apiKey.value.trim()
-        } else {
-            openRouterKey
+        val customKey = apiKey.value.trim().takeIf {
+            isCustomApiKeyEnabled.value && it.isNotBlank()
         }
+        val bundledKey = BuildConfig.OPENROUTER_API_KEY.trim().takeIf { it.isNotBlank() }
+        return customKey ?: bundledKey
+            ?: throw IllegalStateException(
+                "OpenRouter API key missing. Add OPENROUTER_API_KEY to local.properties or enter a custom key in Settings."
+            )
+    }
+
+    private fun requireHuggingFaceToken(): String {
+        return BuildConfig.HUGGING_FACE_TOKEN.trim().takeIf { it.isNotBlank() }
+            ?: throw IllegalStateException(
+                "Hugging Face token missing. Add HUGGING_FACE_TOKEN to local.properties."
+            )
     }
 
     private fun isTunnelHost(cleanHost: String): Boolean {
