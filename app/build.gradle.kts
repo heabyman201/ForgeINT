@@ -10,6 +10,7 @@ plugins {
 
 android {
     namespace = "com.example.forgeint"
+    ndkVersion = "27.0.12077973"
     compileSdk {
         version = release(36)
     }
@@ -21,11 +22,22 @@ android {
         versionCode = 1
         versionName = "1.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        ndk {
+            abiFilters += listOf(
+                "armeabi-v7a",
+                "arm64-v8a",
+                "x86",
+                "x86_64"
+            )
+        }
         buildConfigField("String", "GEMINI_API_KEY", "\"${project.findProperty("GEMINI_API_KEY")}\"")
         externalNativeBuild {
             cmake {
-                cppFlags("-std=c++17 -fexceptions -frtti")
-                arguments("-DANDROID_STL=c++_shared")
+                cppFlags("-std=c++17")
+                arguments(
+                    "-DANDROID_STL=c++_shared",
+                    "-DANDROID_ARM_NEON=TRUE"
+                )
             }
         }
     }
@@ -88,6 +100,7 @@ dependencies {
     implementation(libs.androidx.ui)
     implementation(libs.androidx.ui.text)
     implementation(libs.androidx.ui.geometry)
+    implementation(libs.androidx.foundation)
     ksp("androidx.room:room-compiler:2.6.1") // Or kapt if not using KSP
     implementation("androidx.compose.material:material-icons-extended:1.6.0")
     implementation("com.google.ai.client.generativeai:generativeai:0.9.0")

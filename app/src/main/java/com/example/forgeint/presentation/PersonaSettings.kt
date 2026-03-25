@@ -15,10 +15,10 @@ import androidx.compose.material.icons.filled.RadioButtonUnchecked
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.graphics.Color
@@ -65,11 +65,12 @@ import kotlinx.coroutines.launch
 fun PersonaSettings(
     settingsManager: SettingsManager,
     allPersonas: List<Persona>,
+    nsfwPersonasBlocked: Boolean,
     onPersonaSelected: () -> Unit,
     onCreatePersonaClick: () -> Unit,
     onDeletePersonaClick: (String) -> Unit
 ) {
-    val currentPersonaId by settingsManager.selectedPersonaId.collectAsState(initial = "default")
+    val currentPersonaId by settingsManager.selectedPersonaId.collectAsStateWithLifecycle(initialValue = "default")
     val coroutineScope = rememberCoroutineScope()
     val listState = rememberScalingLazyListState()
     val haptics = LocalHapticFeedback.current
@@ -78,13 +79,17 @@ fun PersonaSettings(
     // Category mapping for personas
     var selectedCategory by remember { mutableStateOf("All") }
     val categories = listOf("All", "Logic", "Dev", "Lifestyle", "Chaos", "Custom")
+    val blockedNsfwIds = remember { setOf("nsfw_uncensored", "nsfw_shitposter") }
 
-    val filteredPersonas = remember(selectedCategory, allPersonas) {
-        if (selectedCategory == "All") allPersonas
-        else if (selectedCategory == "Custom") allPersonas.filter { persona ->
+    val filteredPersonas = remember(selectedCategory, allPersonas, nsfwPersonasBlocked) {
+        val visiblePersonas =
+            if (nsfwPersonasBlocked) allPersonas.filterNot { it.id in blockedNsfwIds } else allPersonas
+
+        if (selectedCategory == "All") visiblePersonas
+        else if (selectedCategory == "Custom") visiblePersonas.filter { persona ->
              !Personas.list.any { it.id == persona.id }
         }
-        else allPersonas.filter { persona ->
+        else visiblePersonas.filter { persona ->
             when (selectedCategory) {
                 "Logic" -> persona.id in listOf("philosopher", "historian")
                 "Dev" -> persona.id in listOf("code_helper", "tech_architect")
@@ -118,6 +123,17 @@ fun PersonaSettings(
                     style = MaterialTheme.typography.caption1,
                     modifier = Modifier.padding(bottom = 8.dp)
                 )
+            }
+
+            if (nsfwPersonasBlocked) {
+                item {
+                    Text(
+                        text = "NSFW personas are disabled on cloud/non-local models.",
+                        style = MaterialTheme.typography.caption3,
+                        color = Color.Gray,
+                        modifier = Modifier.padding(bottom = 6.dp)
+                    )
+                }
             }
 
             // Create Button
@@ -254,3 +270,5 @@ fun PersonaSettings(
         }
     }
 }
+
+

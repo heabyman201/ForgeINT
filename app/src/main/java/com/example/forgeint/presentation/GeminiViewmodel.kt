@@ -1,6 +1,7 @@
 package com.example.forgeint.presentation
 import Persona
 import android.app.Application
+import android.os.SystemClock
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.weargemini.data.SettingsManager
@@ -10,8 +11,9 @@ import com.google.gson.reflect.TypeToken
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.FlowPreview
-import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -23,48 +25,182 @@ import retrofit2.http.HeaderMap
 import retrofit2.http.POST
 import retrofit2.http.Streaming
 import retrofit2.http.Url
-import java.io.File
-import java.io.FileOutputStream
 import java.io.IOException
-import java.net.InetSocketAddress
-import java.net.Socket
+import java.net.URLEncoder
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.ResponseBody
 import okhttp3.ResponseBody.Companion.asResponseBody
-import okio.GzipSource
-import okio.Buffer
-import okio.buffer
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
+import kotlin.math.sqrt
 import java.util.concurrent.TimeUnit
+import org.json.JSONArray
 import org.json.JSONObject
-
-enum class LocalModelStatus {
-    NotPresent,
-    Downloading,
-    Present
-}
 
 enum class ConnectionMode {
     Standalone, // Uses Watch Wi-Fi/LTE directly
     Phone // Proxies requests via Phone
 }
 
+data class PendingPcAction(
+    val command: String,
+    val title: String,
+    val prompt: String,
+    val confirmLabel: String
+)
+
 class GeminiViewModel(application: Application) : AndroidViewModel(application) {
+    companion object {
+        private const val TAG = "GeminiViewModel"
+        private const val STREAM_UI_FRAME_MS = 50L
+        @Volatile private var nativeParserAvailable = false
+        @Volatile private var nativeNumericOpsAvailable = false
+    }
+
     init {
-        System.loadLibrary("forgeint_local")
+        val nativeLoaded = try {
+            System.loadLibrary("forgeint_local")
+            true
+        } catch (e: UnsatisfiedLinkError) {
+            android.util.Log.e(TAG, "Failed to load forgeint_local; using Kotlin parser fallback", e)
+            false
+        } catch (e: Throwable) {
+            android.util.Log.e(TAG, "Unexpected native load failure; using Kotlin parser fallback", e)
+            false
+        }
+        nativeParserAvailable = nativeLoaded
+        nativeNumericOpsAvailable = nativeLoaded
     }
 
     external fun parseStreamChunkNative(rawData: String): String?
+    external fun normalizeVectorNative(raw: FloatArray): FloatArray
+    external fun cosineSimilarityNative(a: FloatArray, b: FloatArray): Double
+    external fun fallbackHashEmbeddingNative(text: String, dim: Int): FloatArray
+    external fun scoreMessageVectorsNative(queryVector: FloatArray, vectorBlobs: Array<ByteArray>): DoubleArray
+
+    private fun parseStreamChunkSafe(rawData: String): String? {
+        if (nativeParserAvailable) {
+            try {
+                return parseStreamChunkNative(rawData)
+            } catch (e: UnsatisfiedLinkError) {
+                nativeParserAvailable = false
+                android.util.Log.e(TAG, "Native parser unavailable at runtime; falling back to Kotlin parser", e)
+            } catch (e: Throwable) {
+                nativeParserAvailable = false
+                android.util.Log.e(TAG, "Native parser failed at runtime; falling back to Kotlin parser", e)
+            }
+        }
+
+        if (!rawData.startsWith("data: ") || rawData.contains("[DONE]")) return null
+        val contentKey = "\"content\":\""
+        val start = rawData.indexOf(contentKey)
+        if (start == -1) return null
+
+        val src = rawData.substring(start + contentKey.length)
+        val out = StringBuilder(minOf(src.length, 2048))
+        var escaped = false
+
+        for (c in src) {
+            if (escaped) {
+                when (c) {
+                    'n' -> out.append('\n')
+                    't' -> out.append('\t')
+                    'r' -> {}
+                    '"', '\\' -> out.append(c)
+                    else -> out.append(c)
+                }
+                escaped = false
+                continue
+            }
+            if (c == '\\') {
+                escaped = true
+                continue
+            }
+            if (c == '"') break
+            out.append(c)
+            if (out.length >= 2048) break
+        }
+        return out.takeIf { it.isNotEmpty() }?.toString()
+    }
+
+    private fun decodeVectorSafe(blob: ByteArray): FloatArray {
+        if (blob.isEmpty()) return FloatArray(0)
+        return decodeVectorJvm(blob)
+    }
+
+    private fun normalizeVectorSafe(raw: FloatArray): FloatArray {
+        if (raw.isEmpty()) return raw
+        if (nativeNumericOpsAvailable) {
+            try {
+                return normalizeVectorNative(raw)
+            } catch (e: UnsatisfiedLinkError) {
+                nativeNumericOpsAvailable = false
+                android.util.Log.e(TAG, "normalizeVectorNative unavailable; using Kotlin fallback", e)
+            } catch (e: Throwable) {
+                nativeNumericOpsAvailable = false
+                android.util.Log.e(TAG, "normalizeVectorNative failed; using Kotlin fallback", e)
+            }
+        }
+        return normalizeVectorJvm(raw)
+    }
+
+    private fun cosineSimilaritySafe(a: FloatArray, b: FloatArray): Double {
+        if (a.isEmpty() || b.isEmpty()) return 0.0
+        if (nativeNumericOpsAvailable) {
+            try {
+                return cosineSimilarityNative(a, b)
+            } catch (e: UnsatisfiedLinkError) {
+                nativeNumericOpsAvailable = false
+                android.util.Log.e(TAG, "cosineSimilarityNative unavailable; using Kotlin fallback", e)
+            } catch (e: Throwable) {
+                nativeNumericOpsAvailable = false
+                android.util.Log.e(TAG, "cosineSimilarityNative failed; using Kotlin fallback", e)
+            }
+        }
+        return cosineSimilarityJvm(a, b)
+    }
+
+    private fun fallbackHashEmbeddingSafe(text: String, dim: Int): FloatArray {
+        if (dim <= 0) return FloatArray(0)
+        if (nativeNumericOpsAvailable) {
+            try {
+                return fallbackHashEmbeddingNative(text, dim)
+            } catch (e: UnsatisfiedLinkError) {
+                nativeNumericOpsAvailable = false
+                android.util.Log.e(TAG, "fallbackHashEmbeddingNative unavailable; using Kotlin fallback", e)
+            } catch (e: Throwable) {
+                nativeNumericOpsAvailable = false
+                android.util.Log.e(TAG, "fallbackHashEmbeddingNative failed; using Kotlin fallback", e)
+            }
+        }
+        return fallbackHashEmbeddingJvm(text, dim)
+    }
+
+    private fun scoreMessageVectorsSafe(queryVector: FloatArray, vectorBlobs: Array<ByteArray>): DoubleArray {
+        if (vectorBlobs.isEmpty()) return DoubleArray(0)
+        if (nativeNumericOpsAvailable) {
+            try {
+                return scoreMessageVectorsNative(queryVector, vectorBlobs)
+            } catch (e: UnsatisfiedLinkError) {
+                nativeNumericOpsAvailable = false
+                android.util.Log.e(TAG, "scoreMessageVectorsNative unavailable; using Kotlin fallback", e)
+            } catch (e: Throwable) {
+                nativeNumericOpsAvailable = false
+                android.util.Log.e(TAG, "scoreMessageVectorsNative failed; using Kotlin fallback", e)
+            }
+        }
+        return DoubleArray(vectorBlobs.size) { idx ->
+            cosineSimilaritySafe(queryVector, decodeVectorSafe(vectorBlobs[idx]))
+        }
+    }
 
     private val dao = ChatDatabase.getDatabase(application).chatDao()
     private val settingsManager = SettingsManager(application)
     private val traitDao = ChatDatabase.getDatabase(application)
     private val customPersonaRepository = com.example.forgeint.data.CustomPersonaRepository(application)
-
-    private val localEngine = LocalInferenceEngine(application)
-    private var isModelLoaded = false
 
     private val phoneCommunicator = PhoneCommunicator(application)
 
@@ -79,9 +215,19 @@ class GeminiViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
+    fun requestPcAction(action: PendingPcAction) {
+        _pendingPcAction.value = action
+    }
+
+    fun clearPcActionRequest() {
+        _pendingPcAction.value = null
+    }
+
     private val openRouterKey = "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"
-    private val huggingFaceToken = "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"
-    private val tavilyApiKey = "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"
+    private val tavilyApiKey = "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"
+    private val embeddingModelId = "text-embedding-qwen3-embedding-0.6b"
+
+    private val fallbackEmbeddingDim = 256
 
     private val _streamingMessage = MutableStateFlow<String?>(null)
     val streamingMessage = _streamingMessage.asStateFlow()
@@ -89,17 +235,17 @@ class GeminiViewModel(application: Application) : AndroidViewModel(application) 
     private val _isThinking = MutableStateFlow(false)
     val isThinking = _isThinking.asStateFlow()
 
+    private val _isWebSearching = MutableStateFlow(false)
+    val isWebSearching = _isWebSearching.asStateFlow()
+
+    private val _pendingPcAction = MutableStateFlow<PendingPcAction?>(null)
+    val pendingPcAction = _pendingPcAction.asStateFlow()
+
     private val okHttpClient = OkHttpClient.Builder()
         .connectTimeout(60, TimeUnit.SECONDS)
         .readTimeout(60, TimeUnit.SECONDS)
         .writeTimeout(60, TimeUnit.SECONDS)
-        // Manual GZIP interceptor removed to allow OkHttp's transparent GZIP handling
-        .build()
 
-    private val downloadHttpClient = OkHttpClient.Builder()
-        .connectTimeout(5, TimeUnit.MINUTES)
-        .readTimeout(5, TimeUnit.MINUTES)
-        .writeTimeout(5, TimeUnit.MINUTES)
         .build()
 
     private val retrofit = Retrofit.Builder()
@@ -111,7 +257,7 @@ class GeminiViewModel(application: Application) : AndroidViewModel(application) 
     private val apiService = retrofit.create(GeminiApiService::class.java)
 
     val currentModelId = settingsManager.selectedModel
-        .stateIn(viewModelScope, SharingStarted.Eagerly, "google/gemma-2-9b-it:free")
+        .stateIn(viewModelScope, SharingStarted.Eagerly, SettingsManager.DEFAULT_CLOUD_MODEL_ID)
 
     val memory_monitor = settingsManager.isMemoryMonitorEnabled
         .stateIn(viewModelScope, SharingStarted.Eagerly, false)
@@ -124,6 +270,24 @@ class GeminiViewModel(application: Application) : AndroidViewModel(application) 
 
     val currentPort = settingsManager.serverPort
         .stateIn(viewModelScope, SharingStarted.Eagerly, "1234")
+
+    val hardwareHostIp = settingsManager.hardwareHostIp
+        .stateIn(viewModelScope, SharingStarted.Eagerly, "192.168.1.1")
+
+    val hardwarePort = settingsManager.hardwarePort
+        .stateIn(viewModelScope, SharingStarted.Eagerly, "8080")
+
+    val remoteHostIp = settingsManager.remoteHostIp
+        .stateIn(viewModelScope, SharingStarted.Eagerly, "100.96.101.62")
+
+    val remotePort = settingsManager.remotePort
+        .stateIn(viewModelScope, SharingStarted.Eagerly, "1235")
+
+    val isFunnelEnabled = settingsManager.isFunnelEnabled
+        .stateIn(viewModelScope, SharingStarted.Eagerly, false)
+
+    val localAuthToken = settingsManager.localAuthToken
+        .stateIn(viewModelScope, SharingStarted.Eagerly, SettingsManager.DEFAULT_LOCAL_AUTH_TOKEN)
 
     val isLocalEnabled = settingsManager.isLocalEnabled
         .stateIn(viewModelScope, SharingStarted.Eagerly, false)
@@ -160,7 +324,9 @@ class GeminiViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
     
-    fun setPersona(personaId: String) = viewModelScope.launch { settingsManager.setSelectedPersona(personaId) }
+    fun setPersona(personaId: String) {
+        viewModelScope.launch { settingsManager.setSelectedPersona(personaId) }
+    }
 
     val isLiteMode = settingsManager.isLiteMode
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(4500), true)
@@ -184,6 +350,9 @@ class GeminiViewModel(application: Application) : AndroidViewModel(application) 
 
     private var _isLoading = MutableStateFlow(false)
     val isLoading = _isLoading.asStateFlow()
+    private val _loadingBurst = MutableStateFlow(false)
+    val loadingBurst = _loadingBurst.asStateFlow()
+    private var loadingBurstJob: Job? = null
 
     private val _isTesting = MutableStateFlow(false)
     val isTesting = _isTesting.asStateFlow()
@@ -199,19 +368,36 @@ class GeminiViewModel(application: Application) : AndroidViewModel(application) 
     private val _isWebSearchEnabled = MutableStateFlow(false)
     val isWebSearchEnabled = _isWebSearchEnabled.asStateFlow()
 
-    private val priorityPorts = listOf(1234, 5000, 8080, 8000, 3000, 11434)
-    private val _localModelStatus = MutableStateFlow<LocalModelStatus>(LocalModelStatus.NotPresent)
-    val localModelStatus = _localModelStatus.asStateFlow()
-
-    private val _modelDownloadProgress = MutableStateFlow(0f)
-    val modelDownloadProgress = _modelDownloadProgress.asStateFlow()
-
-    private val localModelFile = File(application.filesDir, "gemma-2-2b-it-IQ2_XXS.gguf")
     private val _searchQuery = MutableStateFlow("")
     val searchQuery = _searchQuery.asStateFlow()
 
     private val _pendingAction = MutableStateFlow<String?>(null)
     val pendingAction = _pendingAction.asStateFlow()
+    private var activeResponseJob: Job? = null
+    private var isContextRolloverActive = false
+    private var temporaryCloudRoutingSnapshot: Pair<Boolean, String>? = null
+    private var stopRequested = false
+
+    private fun setLoadingState(isLoading: Boolean) {
+        _isLoading.value = isLoading
+        if (!isLoading) {
+            loadingBurstJob?.cancel()
+            loadingBurstJob = null
+            _loadingBurst.value = false
+            return
+        }
+
+        loadingBurstJob?.cancel()
+        loadingBurstJob = viewModelScope.launch {
+            // Give the overlay a softer ramp while still skipping very short requests.
+            delay(180)
+            if (!_isLoading.value) return@launch
+
+            _loadingBurst.value = true
+            delay(780)
+            _loadingBurst.value = false
+        }
+    }
 
     fun setPendingAction(action: String) {
         _pendingAction.value = action
@@ -226,6 +412,7 @@ class GeminiViewModel(application: Application) : AndroidViewModel(application) 
 
     private var sessionStartModelId: String? = null
     private var lastMemoryMaintenanceAt: Long = 0L
+    private var didInitialConnectionCheck = false
 
     private val shortTermExpiryMs = 12 * 60 * 60 * 1000L
     private val shortTermRelevanceAgeMs = 2 * 60 * 60 * 1000L
@@ -241,21 +428,12 @@ class GeminiViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     suspend fun fetchAvailableModels() = withContext(Dispatchers.IO) {
-        val host = currentHostIp.value
-        val port = currentPort.value
-        val cleanHost = host.removePrefix("https://").removePrefix("http://").trim('/')
-        val isTunnel = cleanHost.contains("cloudflare") || cleanHost.contains("ngrok") || cleanHost.contains("loclx")
-
-        val urlString = if (isTunnel) {
-            "https://$cleanHost/v1/models"
-        } else {
-            "http://$cleanHost:$port/v1/models"
-        }
+        val urlString = buildLocalUrl("/v1/models")
+        val headers = buildLocalHeaders()
 
         try {
             val bodyStr: String?
             if (connectionMode.value == ConnectionMode.Phone) {
-                 val headers = if (isTunnel) mapOf("ngrok-skip-browser-warning" to "true", "User-Agent" to "ForgeIntApp") else emptyMap()
                  val remoteRequest = com.example.forgeint.RemoteRequest(
                     url = urlString,
                     method = "GET",
@@ -263,7 +441,9 @@ class GeminiViewModel(application: Application) : AndroidViewModel(application) 
                 )
                 bodyStr = phoneCommunicator.sendRequest(remoteRequest)
             } else {
-                val request = Request.Builder().url(urlString).build()
+                val requestBuilder = Request.Builder().url(urlString)
+                headers.forEach { (k, v) -> requestBuilder.addHeader(k, v) }
+                val request = requestBuilder.build()
                 val response = okHttpClient.newCall(request).execute()
                 bodyStr = response.body?.string()
                 response.close()
@@ -320,13 +500,11 @@ class GeminiViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     init {
-        checkLocalModelStatus()
         checkForEmulator()
         viewModelScope.launch {
-            settingsManager.isLocalEnabled.collectLatest { enabled ->
-                if (enabled) {
-                    testConnection()
-                }
+            if (!didInitialConnectionCheck && settingsManager.isLocalEnabled.first()) {
+                didInitialConnectionCheck = true
+                performConnectionCheck()
             }
         }
     }
@@ -363,103 +541,8 @@ class GeminiViewModel(application: Application) : AndroidViewModel(application) 
 
     override fun onCleared() {
         super.onCleared()
+        activeResponseJob?.cancel()
         phoneCommunicator.cleanup()
-        if (isModelLoaded) {
-            localEngine.unloadModel()
-            isModelLoaded = false
-        }
-    }
-
-    private fun checkLocalModelStatus() {
-        viewModelScope.launch(Dispatchers.IO) {
-            if (localModelFile.exists()) {
-                _localModelStatus.value = LocalModelStatus.Present
-            } else {
-                _localModelStatus.value = LocalModelStatus.NotPresent
-            }
-        }
-    }
-
-    fun downloadLocalModel() {
-        if (_localModelStatus.value == LocalModelStatus.Downloading) return
-
-        viewModelScope.launch(Dispatchers.IO) {
-            _localModelStatus.value = LocalModelStatus.Downloading
-            _modelDownloadProgress.value = 0f
-
-            val modelUrl = "https://huggingface.co/duyntnet/gemma-2-2b-it-imatrix-GGUF/resolve/main/gemma-2-2b-it-IQ2_XXS.gguf?download=true"
-            val tempFile = File(localModelFile.path + ".part")
-
-            try {
-                val request = Request.Builder()
-                    .url(modelUrl)
-                    .header("Authorization", "Bearer $huggingFaceToken")
-                    .build()
-
-                val response = downloadHttpClient.newCall(request).execute()
-
-                if (response.code == 401 || response.code == 403) {
-                    throw IOException("Unauthorized. Check HF Token and License Agreement.")
-                }
-                if (!response.isSuccessful) throw IOException("Failed: ${response.code} ${response.message}")
-
-                val body = response.body ?: throw IOException("Body is null")
-                val contentLength = body.contentLength()
-
-                body.source().use { source ->
-                    FileOutputStream(tempFile).use { outputStream ->
-                        val buffer = ByteArray(8 * 1024)
-                        var bytesCopied: Long = 0
-                        var bytesRead: Int
-
-                        while (source.read(buffer).also { bytesRead = it } != -1) {
-                            outputStream.write(buffer, 0, bytesRead)
-                            bytesCopied += bytesRead
-
-                            if (contentLength > 0) {
-                                _modelDownloadProgress.value = (bytesCopied.toFloat() / contentLength).coerceIn(0f, 1f)
-                            } else {
-                                _modelDownloadProgress.value = -1f
-                            }
-                        }
-                    }
-                }
-
-                if (tempFile.length() < 100 * 1024 * 1024) {
-                    throw IOException("File too small. Likely an error page.")
-                }
-
-                if (localModelFile.exists()) {
-                    localModelFile.delete()
-                }
-
-                if (!tempFile.renameTo(localModelFile)) {
-                    throw IOException("Failed to move file to final destination.")
-                }
-
-                _localModelStatus.value = LocalModelStatus.Present
-
-            } catch (e: Exception) {
-                e.printStackTrace()
-                _localModelStatus.value = LocalModelStatus.NotPresent
-                tempFile.delete()
-            } finally {
-                _modelDownloadProgress.value = 0f
-            }
-        }
-    }
-
-    fun deleteLocalModel() {
-        viewModelScope.launch(Dispatchers.IO) {
-            if (isModelLoaded) {
-                localEngine.unloadModel()
-                isModelLoaded = false
-            }
-            if (localModelFile.exists()) {
-                localModelFile.delete()
-            }
-            _localModelStatus.value = LocalModelStatus.NotPresent
-        }
     }
 
     val currentChat = _currentConversationId.flatMapLatest { id ->
@@ -484,33 +567,197 @@ class GeminiViewModel(application: Application) : AndroidViewModel(application) 
         _messageLimit.value += 20
     }
 
-    fun setModel(modelId: String) = viewModelScope.launch { settingsManager.setModel(modelId) }
-    fun setTheme(theme: String) = viewModelScope.launch { settingsManager.setAppTheme(theme) }
-    fun setLiteMode(enabled: Boolean) = viewModelScope.launch { settingsManager.setLiteMode(enabled) }
-    fun setVoiceDominantMode(enabled: Boolean) = viewModelScope.launch { settingsManager.setVoiceDominantMode(enabled) }
-    fun toggleLocalMode(enabled: Boolean) = viewModelScope.launch { settingsManager.setLocalEnabled(enabled) }
-    fun setMessageLength(length: String) = viewModelScope.launch { settingsManager.setMessageLength(length) }
-    fun updateApiKey(key: String) = viewModelScope.launch { settingsManager.setApiKey(key) }
-    fun toggleCustomApiKey(enabled: Boolean) = viewModelScope.launch { settingsManager.setCustomApiKeyEnabled(enabled) }
-
-    fun updateHostIp(newIp: String) = viewModelScope.launch {
-        val cleanIp = newIp
-            .replace("https://", "")
-            .replace("http://", "")
-            .replace("/", "")
-            .trim()
-
-        val newUrl = "http://$cleanIp"
-
-        settingsManager.setHostIp(newUrl)
-
-        _testResult.value = null
-        _testResult.value = null
+    fun setModel(modelId: String) {
+        viewModelScope.launch { settingsManager.setModel(modelId) }
     }
 
-    fun updatePort(newPort: String) = viewModelScope.launch {
-        settingsManager.setServerPort(newPort)
-        _testResult.value = null
+    fun setTheme(theme: String) {
+        viewModelScope.launch { settingsManager.setAppTheme(theme) }
+    }
+
+    fun setLiteMode(enabled: Boolean) {
+        viewModelScope.launch { settingsManager.setLiteMode(enabled) }
+    }
+
+    fun setVoiceDominantMode(enabled: Boolean) {
+        viewModelScope.launch { settingsManager.setVoiceDominantMode(enabled) }
+    }
+
+    fun toggleLocalMode(enabled: Boolean) {
+        viewModelScope.launch { settingsManager.setLocalEnabled(enabled) }
+    }
+
+    suspend fun setTemporaryCloudRouting(
+        enabled: Boolean,
+        telemetry: SystemStabilityTelemetry? = null
+    ): Boolean {
+        return withContext(Dispatchers.IO) {
+            if (enabled) {
+                if (temporaryCloudRoutingSnapshot != null) return@withContext false
+
+                val previousLocalMode = settingsManager.isLocalEnabled.first()
+                val previousModel = settingsManager.selectedModel.first()
+                temporaryCloudRoutingSnapshot = previousLocalMode to previousModel
+
+                if (previousLocalMode) {
+                    settingsManager.setLocalEnabled(false)
+                }
+
+                val targetModel = SettingsManager.DEFAULT_CLOUD_MODEL_ID
+                if (previousModel != targetModel) {
+                    settingsManager.setModel(targetModel)
+                }
+
+                telemetry?.let {
+                    android.util.Log.w(TAG, "Temporary OpenRouter routing enabled due to instability: ${it.describe()}")
+                }
+                true
+            } else {
+                val snapshot = temporaryCloudRoutingSnapshot ?: return@withContext false
+                temporaryCloudRoutingSnapshot = null
+
+                settingsManager.setLocalEnabled(snapshot.first)
+                if (snapshot.second.isNotBlank()) {
+                    settingsManager.setModel(snapshot.second)
+                }
+
+                telemetry?.let {
+                    android.util.Log.i(TAG, "Temporary OpenRouter routing cleared after stability recovered: ${it.describe()}")
+                }
+                true
+            }
+        }
+    }
+
+    fun setMessageLength(length: String) {
+        viewModelScope.launch { settingsManager.setMessageLength(length) }
+    }
+
+    fun updateApiKey(key: String) {
+        viewModelScope.launch { settingsManager.setApiKey(key) }
+    }
+
+    fun toggleCustomApiKey(enabled: Boolean) {
+        viewModelScope.launch { settingsManager.setCustomApiKeyEnabled(enabled) }
+    }
+
+    fun updateHostIp(newIp: String) {
+        viewModelScope.launch {
+            val cleanIp = newIp
+                .replace("https://", "")
+                .replace("http://", "")
+                .replace("/", "")
+                .trim()
+            val useHttps = cleanIp.endsWith(".ts.net", ignoreCase = true) || isFunnelEnabled.value
+            val newUrl = if (useHttps) "https://$cleanIp" else "http://$cleanIp"
+
+            settingsManager.setHostIp(newUrl)
+
+            _testResult.value = null
+            _testResult.value = null
+        }
+    }
+
+    fun updatePort(newPort: String) {
+        viewModelScope.launch {
+            settingsManager.setServerPort(newPort)
+            _testResult.value = null
+        }
+    }
+
+    fun updateHardwareHostIp(newIp: String) {
+        viewModelScope.launch {
+            val cleanIp = newIp
+                .replace("https://", "")
+                .replace("http://", "")
+                .replace("/", "")
+                .trim()
+            val useHttps = cleanIp.endsWith(".ts.net", ignoreCase = true) ||
+                cleanIp.contains("cloudflare", ignoreCase = true) ||
+                cleanIp.contains("ngrok", ignoreCase = true) ||
+                cleanIp.contains("loclx", ignoreCase = true) ||
+                isFunnelEnabled.value
+            val newUrl = if (useHttps) "https://$cleanIp" else "http://$cleanIp"
+
+            settingsManager.setHardwareHostIp(newUrl)
+        }
+    }
+
+    fun updateHardwarePort(newPort: String) {
+        viewModelScope.launch {
+            settingsManager.setHardwarePort(newPort)
+        }
+    }
+
+    fun updateRemoteHostIp(newIp: String) {
+        viewModelScope.launch {
+            val cleanIp = newIp
+                .replace("https://", "")
+                .replace("http://", "")
+                .replace("/", "")
+                .trim()
+            val useHttps = cleanIp.endsWith(".ts.net", ignoreCase = true) ||
+                    cleanIp.contains("cloudflare", ignoreCase = true) ||
+                    cleanIp.contains("ngrok", ignoreCase = true) ||
+                    cleanIp.contains("loclx", ignoreCase = true) ||
+                    isFunnelEnabled.value
+            val newUrl = if (useHttps) "https://$cleanIp" else "http://$cleanIp"
+
+            settingsManager.setRemoteHostIp(newUrl)
+        }
+    }
+
+    fun updateRemotePort(newPort: String) {
+        viewModelScope.launch {
+            settingsManager.setRemotePort(newPort)
+        }
+    }
+
+    fun setFunnelEnabled(enabled: Boolean) {
+        viewModelScope.launch {
+            settingsManager.setFunnelEnabled(enabled)
+            _testResult.value = null
+        }
+    }
+
+    fun updateLocalAuthToken(token: String) {
+        viewModelScope.launch {
+            settingsManager.setLocalAuthToken(token)
+        }
+    }
+
+    private fun isTunnelHost(cleanHost: String): Boolean {
+        val lowered = cleanHost.lowercase()
+        return isFunnelEnabled.value ||
+            lowered.endsWith(".ts.net") ||
+            lowered.contains("cloudflare") ||
+            lowered.contains("ngrok") ||
+            lowered.contains("loclx")
+    }
+
+    private fun buildLocalUrl(path: String): String {
+        val cleanHost = currentHostIp.value.removePrefix("https://").removePrefix("http://").trim('/')
+        return if (isTunnelHost(cleanHost)) {
+            "https://$cleanHost$path"
+        } else {
+            "http://$cleanHost:${currentPort.value}$path"
+        }
+    }
+
+    private fun buildLocalHeaders(): HashMap<String, String> {
+        val headers = HashMap<String, String>()
+        val cleanHost = currentHostIp.value.removePrefix("https://").removePrefix("http://").trim('/').lowercase()
+        val isTunnel = isTunnelHost(cleanHost)
+        if (isTunnel) {
+            if (cleanHost.contains("ngrok")) {
+                headers["ngrok-skip-browser-warning"] = "true"
+            }
+            headers["User-Agent"] = "ForgeIntApp"
+        }
+        if (localAuthToken.value.isNotBlank()) {
+            headers["Authorization"] = "Bearer ${localAuthToken.value.trim()}"
+        }
+        return headers
     }
 
     val allTraits = traitDao.traitDao().getAllTraitsFlow()
@@ -555,20 +802,97 @@ class GeminiViewModel(application: Application) : AndroidViewModel(application) 
     fun startNewChat(prompt: String) {
         if (_isLoading.value) return
 
-        viewModelScope.launch {
-            if (isLocalEnabled.value) {
-                performConnectionCheck()
-            }
+        activeResponseJob = viewModelScope.launch {
+            stopRequested = false
             sessionStartModelId = currentModelId.value
             _messageLimit.value = 20
             val newId = dao.insertConversation(Conversation(summary = prompt))
             _currentConversationId.value = newId
-            dao.insertMessage(Message(conversationId = newId, text = prompt, isUser = true))
-            generateResponse(newId)
+            val userMessageId = dao.insertMessage(Message(conversationId = newId, text = prompt, isUser = true))
+            queueEmbeddingForMessage(userMessageId, prompt)
+            generateResponse(newId, titleSeedUserPrompt = prompt)
+            launch(Dispatchers.IO) { extractAndStoreTraits(prompt) }
+        }
+    }
 
-            if ((!isLocalEnabled.value || !localModelFile.exists()) && !isLiteMode.value) {
-                launch(Dispatchers.IO) { extractAndStoreTraits(prompt) }
+    fun startEmptyChat() {
+        if (_isLoading.value) return
+
+        activeResponseJob?.cancel()
+        stopRequested = false
+        sessionStartModelId = currentModelId.value
+        _messageLimit.value = 20
+        _streamingMessage.value = null
+        _isThinking.value = false
+        _isWebSearching.value = false
+        setLoadingState(false)
+
+        viewModelScope.launch {
+            val newId = dao.insertConversation(Conversation(summary = "New Conversation"))
+            _currentConversationId.value = newId
+        }
+    }
+
+    fun startVoiceChat() {
+        if (_isLoading.value) return
+
+        activeResponseJob?.cancel()
+        stopRequested = false
+        sessionStartModelId = currentModelId.value
+        _messageLimit.value = 20
+        _streamingMessage.value = null
+        _isThinking.value = false
+        _isWebSearching.value = false
+        setLoadingState(false)
+
+        viewModelScope.launch {
+            val newId = dao.insertConversation(Conversation(summary = "New Voice Chat"))
+            _currentConversationId.value = newId
+        }
+    }
+
+    suspend fun summarizeCurrentChatAndRollContext(telemetry: VramTelemetry? = null): Boolean {
+        if (_isLoading.value) return false
+        if (isContextRolloverActive) return false
+
+        val chatId = _currentConversationId.value ?: return false
+        val activeChat = currentChat.value ?: return false
+        val history = dao.getMessages(chatId, 100).first().reversed()
+        if (history.isEmpty()) return false
+
+        isContextRolloverActive = true
+        return try {
+            withContext(Dispatchers.IO) {
+                val summary = generateContextCarryoverSummary(activeChat.conversation.summary, history, telemetry)
+                    ?: return@withContext false
+
+                val newConversationTitle = buildString {
+                    append("Continued")
+                    activeChat.conversation.summary
+                        .takeIf { it.isNotBlank() }
+                        ?.let { append(": ${it.take(40)}") }
+                }
+
+                val newId = dao.insertConversation(Conversation(summary = newConversationTitle))
+                dao.insertMessage(
+                    Message(
+                        conversationId = newId,
+                        text = buildCarryoverSeedMessage(summary, telemetry),
+                        isUser = false
+                    )
+                )
+                _messageLimit.value = 20
+                _streamingMessage.value = null
+                _isThinking.value = false
+                _isWebSearching.value = false
+                _currentConversationId.value = newId
+                true
             }
+        } catch (t: Throwable) {
+            android.util.Log.e(TAG, "Context rollover failed", t)
+            false
+        } finally {
+            isContextRolloverActive = false
         }
     }
 
@@ -576,27 +900,60 @@ class GeminiViewModel(application: Application) : AndroidViewModel(application) 
         if (_isLoading.value) return
 
         val chatId = _currentConversationId.value ?: return
-        viewModelScope.launch(Dispatchers.IO) {
-            if (isLocalEnabled.value) {
-                performConnectionCheck()
-            }
-            dao.insertMessage(Message(conversationId = chatId, text =  prompt, isUser = true))
+        activeResponseJob = viewModelScope.launch(Dispatchers.IO) {
+            stopRequested = false
+            val shouldSeedTitle = dao.getRecentMessagesForConversation(chatId, limit = 1).isEmpty()
+            val userMessageId = dao.insertMessage(Message(conversationId = chatId, text =  prompt, isUser = true))
+            queueEmbeddingForMessage(userMessageId, prompt)
+            launch(Dispatchers.IO) { extractAndStoreTraits(prompt) }
 
-            if ((!isLocalEnabled.value || !localModelFile.exists()) && !isLiteMode.value) {
-                launch(Dispatchers.IO) { extractAndStoreTraits(prompt) }
-            }
-
-            generateResponse(chatId)
+            generateResponse(
+                chatId,
+                titleSeedUserPrompt = prompt.takeIf { shouldSeedTitle }
+            )
         }
+    }
+
+    fun submitVoiceInput(prompt: String) {
+        val trimmedPrompt = prompt.trim()
+        if (trimmedPrompt.isEmpty() || _isLoading.value) return
+
+        val chatId = _currentConversationId.value
+        if (chatId == null) {
+            startNewChat(trimmedPrompt)
+            return
+        }
+
+        activeResponseJob = viewModelScope.launch(Dispatchers.IO) {
+            stopRequested = false
+            val shouldSeedTitle = dao.getRecentMessagesForConversation(chatId, limit = 1).isEmpty()
+
+            val userMessageId = dao.insertMessage(
+                Message(conversationId = chatId, text = trimmedPrompt, isUser = true)
+            )
+            queueEmbeddingForMessage(userMessageId, trimmedPrompt)
+            launch(Dispatchers.IO) { extractAndStoreTraits(trimmedPrompt) }
+
+            generateResponse(
+                chatId,
+                titleSeedUserPrompt = trimmedPrompt.takeIf { shouldSeedTitle }
+            )
+        }
+    }
+
+    fun stopResponse() {
+        stopRequested = true
+        activeResponseJob?.cancel(CancellationException("Stopped by user"))
+        _isThinking.value = false
+        _isWebSearching.value = false
+        _streamingMessage.value = null
+        setLoadingState(false)
     }
 
     fun openChat(id: Long) {
         _messageLimit.value = 20
         _currentConversationId.value = id
         sessionStartModelId = currentModelId.value
-        if (isLocalEnabled.value) {
-            testConnection()
-        }
     }
 
     fun deleteChat(id: Long) {
@@ -609,10 +966,6 @@ class GeminiViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     private suspend fun extractAndStoreTraits(userText: String) {
-        if (isLiteMode.value) {
-            android.util.Log.d("MemoryDebug", "Skipping memory: LiteMode is ON")
-            return
-        }
         if (userText.length < 8) {
             android.util.Log.d("MemoryDebug", "Skipping memory: Text too short (${userText.length} < 8)")
             return
@@ -657,17 +1010,13 @@ class GeminiViewModel(application: Application) : AndroidViewModel(application) 
             val responseText: String? = if (connectionMode.value == ConnectionMode.Phone) {
                 val gson = Gson()
                 // Determine URL and Headers based on local/cloud setting
-                val useLocalNet = isLocalEnabled.value && !localModelFile.exists()
+                val useLocalNet = isLocalEnabled.value
                 val url: String
                 val headers: Map<String, String>
 
                 if (useLocalNet) {
-                    val host = currentHostIp.value
-                    val port = currentPort.value
-                    val cleanHost = host.removePrefix("https://").removePrefix("http://").trim('/')
-                    val isTunnel = cleanHost.contains("cloudflare") || cleanHost.contains("ngrok")
-                    url = if (isTunnel) "https://$cleanHost/v1/chat/completions" else "http://$cleanHost:$port/v1/chat/completions"
-                    headers = if (isTunnel) mapOf("ngrok-skip-browser-warning" to "true", "User-Agent" to "ForgeIntApp") else emptyMap()
+                    url = buildLocalUrl("/v1/chat/completions")
+                    headers = buildLocalHeaders()
                 } else {
                     val currentKey = if (isCustomApiKeyEnabled.value && apiKey.value.isNotBlank()) apiKey.value else openRouterKey
                     url = "https://openrouter.ai/api/v1/chat/completions"
@@ -694,23 +1043,9 @@ class GeminiViewModel(application: Application) : AndroidViewModel(application) 
                     null
                 }
 
-            } else if (isLocalEnabled.value && !localModelFile.exists()) {
-                val host = currentHostIp.value
-                val port = currentPort.value
-                val cleanHost = host.removePrefix("https://").removePrefix("http://").trim('/')
-                val isTunnel = cleanHost.contains("cloudflare") || cleanHost.contains("ngrok")
-
-                val urlString = if (isTunnel) {
-                    "https://$cleanHost/v1/chat/completions"
-                } else {
-                    "http://$cleanHost:$port/v1/chat/completions"
-                }
-
-                val headers = HashMap<String, String>()
-                if (isTunnel) {
-                    headers["ngrok-skip-browser-warning"] = "true"
-                    headers["User-Agent"] = "ForgeIntApp"
-                }
+            } else if (isLocalEnabled.value) {
+                val urlString = buildLocalUrl("/v1/chat/completions")
+                val headers = buildLocalHeaders()
 
                 val response = apiService.chatLocalBlocking(urlString, headers, request)
                 val content = response.choices.firstOrNull()?.message?.content
@@ -1060,38 +1395,15 @@ class GeminiViewModel(application: Application) : AndroidViewModel(application) 
     private suspend fun performConnectionCheck() {
         _isTesting.value = true
         _testResult.value = "Checking connection..."
-        val host = currentHostIp.value
-        val cleanHost = host.removePrefix("https://").removePrefix("http://").trim('/')
-
-        val isTunnel = cleanHost.contains("cloudflare") || cleanHost.contains("ngrok") || cleanHost.contains("loclx")
-        val finalPort = if (isTunnel) {
-            _testResult.value = "Tunnel detected. Skipping port scan..."
-            ""
-        } else {
-            _testResult.value = "Scanning local network..."
-            val scanned = scanAllPorts(cleanHost)
-            if (scanned != null) {
-                settingsManager.setServerPort(scanned)
-                scanned
-            } else {
-                currentPort.value
-            }
-        }
-
-        val urlString = if (isTunnel) {
-            "https://$cleanHost/v1/models"
-        } else {
-            "http://$cleanHost:$finalPort/v1/models"
-        }
+        val cleanHost = currentHostIp.value.removePrefix("https://").removePrefix("http://").trim('/')
+        val urlString = buildLocalUrl("/v1/models")
+        val headers = buildLocalHeaders()
 
         try {
             val result = withContext(Dispatchers.IO) {
                 try {
                     val requestBuilder = Request.Builder().url(urlString)
-                    if (isTunnel) {
-                        requestBuilder.addHeader("ngrok-skip-browser-warning", "true")
-                        requestBuilder.addHeader("User-Agent", "ForgeIntApp")
-                    }
+                    headers.forEach { (k, v) -> requestBuilder.addHeader(k, v) }
                     val response = okHttpClient.newCall(requestBuilder.build()).execute()
                     val code = response.code
                     response.close()
@@ -1120,102 +1432,563 @@ class GeminiViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
-    private suspend fun scanAllPorts(host: String): String? = withContext(Dispatchers.IO) {
-        for (port in priorityPorts) {
-            if (isPortOpen(host, port)) return@withContext port.toString()
+    private suspend fun buildRelevantConversationContext(currentChatId: Long, latestUserPrompt: String): String {
+        if (latestUserPrompt.isBlank()) return ""
+
+        val recentConversations = dao.getRecentConversationsForMemory(
+            excludeConversationId = currentChatId,
+            limit = 40
+        )
+        if (recentConversations.isEmpty()) return ""
+
+        val messagesByConversation = recentConversations.associate { conversation ->
+            conversation.id to dao.getRecentMessagesForConversation(conversation.id, limit = 12)
+        }
+        val vectorScores = buildConversationVectorScores(latestUserPrompt, messagesByConversation)
+
+        val ranked = MemoryRetrievalEngine.rankConversations(
+            query = latestUserPrompt,
+            conversations = recentConversations,
+            messagesByConversation = messagesByConversation,
+            vectorScoresByConversation = vectorScores,
+            maxResults = 7
+        )
+        return MemoryRetrievalEngine.buildPromptContext(ranked)
+    }
+
+    private suspend fun buildConversationVectorScores(
+        query: String,
+        messagesByConversation: Map<Long, List<Message>>
+    ): Map<Long, Double> {
+        val conversationIds = messagesByConversation.keys.toList()
+        val queryVector = generateEmbeddingVector(query) ?: return conversationIds.associateWith { 0.0 }
+        val allMessages = messagesByConversation.values.flatten().filter { it.id > 0L }
+        if (allMessages.isEmpty()) return conversationIds.associateWith { 0.0 }
+
+        val messageIds = allMessages.map { it.id }
+        val existingEmbeddings = dao.getEmbeddingsForMessages(messageIds)
+        val embeddingByMessageId = existingEmbeddings.associateBy { it.messageId }.toMutableMap()
+
+        val missingMessages = allMessages
+            .filter { it.id !in embeddingByMessageId }
+            .takeLast(12)
+
+        missingMessages.forEach { msg ->
+            val vec = generateEmbeddingVector(msg.text) ?: return@forEach
+            val encoded = encodeVector(vec)
+            val saved = MessageEmbedding(
+                messageId = msg.id,
+                vector = encoded,
+                model = embeddingModelId
+            )
+            dao.upsertMessageEmbedding(saved)
+            embeddingByMessageId[msg.id] = saved
         }
 
-        val maxPort = 65535
-        val chunkSize = 500
-
-        for (start in 1..maxPort step chunkSize) {
-            val end = (start + chunkSize - 1).coerceAtMost(maxPort)
-            _testResult.value = "Scanning ports $start - $end..."
-
-            val deferredResults = (start..end).map { port ->
-                async { if (isPortOpen(host, port)) port else null }
+        val messageConversationIds = ArrayList<Long>()
+        val vectorBlobs = ArrayList<ByteArray>()
+        messagesByConversation.forEach { (conversationId, messages) ->
+            messages.forEach { msg ->
+                val stored = embeddingByMessageId[msg.id] ?: return@forEach
+                messageConversationIds.add(conversationId)
+                vectorBlobs.add(stored.vector)
             }
+        }
+        if (vectorBlobs.isEmpty()) return conversationIds.associateWith { 0.0 }
 
-            val found = deferredResults.awaitAll().filterNotNull().firstOrNull()
-            if (found != null) return@withContext found.toString()
+        val sims = scoreMessageVectorsSafe(queryVector, vectorBlobs.toTypedArray())
+        val top3ByConversation = HashMap<Long, DoubleArray>()
+        for (i in sims.indices) {
+            val conversationId = messageConversationIds.getOrNull(i) ?: continue
+            val top = top3ByConversation.getOrPut(conversationId) {
+                doubleArrayOf(Double.NEGATIVE_INFINITY, Double.NEGATIVE_INFINITY, Double.NEGATIVE_INFINITY)
+            }
+            val score = sims[i]
+            when {
+                score > top[0] -> {
+                    top[2] = top[1]
+                    top[1] = top[0]
+                    top[0] = score
+                }
+                score > top[1] -> {
+                    top[2] = top[1]
+                    top[1] = score
+                }
+                score > top[2] -> top[2] = score
+            }
         }
 
-        _testResult.value = "No local ports found."
-        return@withContext null
+        return conversationIds.associateWith { conversationId ->
+            val top = top3ByConversation[conversationId] ?: return@associateWith 0.0
+            var sum = 0.0
+            var count = 0
+            for (score in top) {
+                if (score.isFinite()) {
+                    sum += score
+                    count++
+                }
+            }
+            if (count == 0) 0.0 else (sum / count).coerceIn(0.0, 1.0)
+        }
     }
 
-    private fun isPortOpen(host: String, port: Int): Boolean {
+    private fun encodeVector(vector: FloatArray): ByteArray {
+        if (vector.isEmpty()) return ByteArray(0)
+        val buffer = ByteBuffer.allocate(vector.size * 4).order(ByteOrder.LITTLE_ENDIAN)
+        vector.forEach { buffer.putFloat(it) }
+        return buffer.array()
+    }
+
+    private fun decodeVectorJvm(encoded: ByteArray): FloatArray {
+        if (encoded.isEmpty()) return FloatArray(0)
+        val count = encoded.size / 4
+        if (count == 0) return FloatArray(0)
+        val bytesToRead = count * 4
+        val buffer = ByteBuffer.wrap(encoded, 0, bytesToRead).order(ByteOrder.LITTLE_ENDIAN)
+        val out = FloatArray(count)
+        for (i in 0 until count) {
+            out[i] = buffer.float
+        }
+        return out
+    }
+
+    private fun normalizeVectorJvm(raw: FloatArray): FloatArray {
+        if (raw.isEmpty()) return raw
+        val norm = sqrt(raw.sumOf { (it * it).toDouble() }).toFloat()
+        if (norm <= 1e-8f) return raw
+        return FloatArray(raw.size) { idx -> raw[idx] / norm }
+    }
+
+    private fun cosineSimilarityJvm(a: FloatArray, b: FloatArray): Double {
+        if (a.isEmpty() || b.isEmpty()) return 0.0
+        val size = minOf(a.size, b.size)
+        var dot = 0.0
+        var normA = 0.0
+        var normB = 0.0
+        for (i in 0 until size) {
+            val va = a[i].toDouble()
+            val vb = b[i].toDouble()
+            dot += va * vb
+            normA += va * va
+            normB += vb * vb
+        }
+        if (normA <= 1e-10 || normB <= 1e-10) return 0.0
+        return (dot / (sqrt(normA) * sqrt(normB))).coerceIn(0.0, 1.0)
+    }
+
+    private fun fallbackHashEmbeddingJvm(text: String, dim: Int = fallbackEmbeddingDim): FloatArray {
+        val vec = FloatArray(dim)
+        val tokens = Regex("[a-zA-Z0-9']+").findAll(text.lowercase()).map { it.value }.toList()
+        tokens.forEachIndexed { index, token ->
+            val hash = token.hashCode()
+            val idx = kotlin.math.abs(hash) % dim
+            val sign = if (((hash ushr 1) and 1) == 0) 1f else -1f
+            vec[idx] += sign * (1f + (index % 3) * 0.1f)
+        }
+        return normalizeVectorJvm(vec)
+    }
+
+    private suspend fun generateEmbeddingVector(text: String): FloatArray? {
+        val clean = text.trim()
+        if (clean.isBlank()) return null
+
+        val useLocalNet = isLocalEnabled.value
+        val request = EmbeddingRequest(
+            model = embeddingModelId,
+            input = clean.take(2500)
+        )
+
+        val remoteVector = try {
+            when {
+                connectionMode.value == ConnectionMode.Phone -> {
+                    val gson = Gson()
+                    if (useLocalNet) {
+                        val rr = com.example.forgeint.RemoteRequest(
+                            url = buildLocalUrl("/v1/embeddings"),
+                            method = "POST",
+                            headers = buildLocalHeaders(),
+                            body = gson.toJson(request)
+                        )
+                        parseEmbeddingFromJson(phoneCommunicator.sendRequest(rr))
+                    } else {
+                        val currentKey = if (isCustomApiKeyEnabled.value && apiKey.value.isNotBlank()) apiKey.value else openRouterKey
+                        val rr = com.example.forgeint.RemoteRequest(
+                            url = "https://openrouter.ai/api/v1/embeddings",
+                            method = "POST",
+                            headers = mapOf(
+                                "Authorization" to "Bearer $currentKey",
+                                "HTTP-Referer" to "https://forgeint.app",
+                                "X-Title" to "ForgeInt"
+                            ),
+                            body = gson.toJson(request)
+                        )
+                        parseEmbeddingFromJson(phoneCommunicator.sendRequest(rr))
+                    }
+                }
+                useLocalNet -> {
+                    apiService.embeddingsLocal(
+                        buildLocalUrl("/v1/embeddings"),
+                        buildLocalHeaders(),
+                        request
+                    ).data.firstOrNull()?.embedding?.map { it.toFloat() }?.toFloatArray()
+                }
+                else -> {
+                    val currentKey = if (isCustomApiKeyEnabled.value && apiKey.value.isNotBlank()) apiKey.value else openRouterKey
+                    apiService.embeddingsOpenRouter(
+                        "Bearer $currentKey",
+                        "https://forgeint.app",
+                        "ForgeInt",
+                        request
+                    ).data.firstOrNull()?.embedding?.map { it.toFloat() }?.toFloatArray()
+                }
+            }
+        } catch (_: Exception) {
+            null
+        }
+
+        return normalizeVectorSafe(remoteVector ?: fallbackHashEmbeddingSafe(clean, fallbackEmbeddingDim))
+    }
+
+    private fun parseEmbeddingFromJson(raw: String?): FloatArray? {
+        if (raw.isNullOrBlank()) return null
         return try {
-            val socket = Socket()
-            socket.connect(InetSocketAddress(host, port), 150)
-            socket.close()
-            true
-        } catch (e: Exception) {
-            false
+            val root = JSONObject(raw)
+            val data = root.optJSONArray("data") ?: return null
+            if (data.length() <= 0) return null
+            val first = data.optJSONObject(0) ?: return null
+            val embedding = first.optJSONArray("embedding") ?: return null
+            val vec = FloatArray(embedding.length())
+            for (i in 0 until embedding.length()) {
+                vec[i] = embedding.optDouble(i, 0.0).toFloat()
+            }
+            vec
+        } catch (_: Exception) {
+            null
         }
     }
 
-    private fun formatGemmaPrompt(systemPrompt: String, history: List<Message>): String {
-        val sb = StringBuilder()
-        sb.append("<start_of_turn>system\n$systemPrompt<end_of_turn>\n")
-
-        val safeHistory = history.takeLast(6)
-        safeHistory.forEach { msg ->
-            val role = if (msg.isUser) "user" else "model"
-            sb.append("<start_of_turn>$role\n${msg.text}<end_of_turn>\n")
+    private fun queueEmbeddingForMessage(messageId: Long, text: String) {
+        if (messageId <= 0L || text.isBlank()) return
+        viewModelScope.launch(Dispatchers.IO) {
+            val vec = generateEmbeddingVector(text) ?: return@launch
+            dao.upsertMessageEmbedding(
+                MessageEmbedding(
+                    messageId = messageId,
+                    vector = encodeVector(vec),
+                    model = embeddingModelId
+                )
+            )
         }
-
-        sb.append("<start_of_turn>model\n")
-        return sb.toString()
     }
 
     private suspend fun performWebSearch(query: String): String {
         return withContext(Dispatchers.IO) {
-            try {
-                val json = JSONObject()
-                json.put("query", query)
-                json.put("include_answer", true)
-                json.put("topic", "general")
+            val key = tavilyApiKey.trim()
+            val keyConfigured = key.startsWith("tvly-") &&
+                !key.contains("REPLACE_WITH_YOUR_TAVILY_API_KEY", ignoreCase = true)
+            if (!keyConfigured) {
+                return@withContext performDuckDuckGoSearch(
+                    query,
+                    priorError = "Tavily API key missing. Set tavilyApiKey in GeminiViewModel."
+                )
+            }
+            performTavilySearch(query, key)
+        }
+    }
 
-                val requestBody = json.toString().toRequestBody("application/json".toMediaType())
+    private suspend fun performWebSearchByConnection(query: String): String {
+        // Use same provider in both modes for deterministic behavior.
+        return performWebSearch(query)
+    }
+
+    private suspend fun performTavilySearch(query: String, key: String): String {
+        return withContext(Dispatchers.IO) {
+            try {
+                val requestBody = JSONObject()
+                    .put("query", query)
+                    .put("topic", "general")
+                    .put("search_depth", "basic")
+                    .put("max_results", 5)
+                    .put("include_answer", "advanced")
+                    .put("include_raw_content", false)
+                    .put("include_images", false)
+                    .put("include_image_descriptions", false)
+                    .toString()
 
                 val request = Request.Builder()
                     .url("https://api.tavily.com/search")
-                    .post(requestBody)
-                    .addHeader("Authorization", "Bearer $tavilyApiKey")
+                    .addHeader("Authorization", "Bearer $key")
+                    .addHeader("Content-Type", "application/json")
+                    .post(requestBody.toRequestBody("application/json; charset=utf-8".toMediaType()))
                     .build()
 
                 val response = okHttpClient.newCall(request).execute()
-                val bodyStr = response.body?.string()
+                val bodyStr = response.body?.string().orEmpty()
 
-                if (bodyStr != null) {
-                    val responseJson = JSONObject(bodyStr)
-                    val results = responseJson.optJSONArray("results")
-                    val answer = responseJson.optString("answer", "")
-
-                    val sb = StringBuilder()
-                    if (answer.isNotEmpty()) sb.append("Summary: $answer\n\n")
-
-                    if (results != null) {
-                        for (i in 0 until results.length()) {
-                            val item = results.getJSONObject(i)
-                            sb.append("Title: ${item.optString("title")}\n")
-                            sb.append("URL: ${item.optString("url")}\n")
-                            sb.append("Content: ${item.optString("content")}\n\n")
-                        }
-                    }
-                    sb.toString()
-                } else {
-                    "No results returned."
+                if (!response.isSuccessful) {
+                    return@withContext performDuckDuckGoSearch(
+                        query,
+                        priorError = "Tavily HTTP ${response.code}: ${bodyStr.take(240)}"
+                    )
                 }
+
+                val json = JSONObject(bodyStr)
+                val answer = json.optString("answer", "")
+                val sourceResults = json.optJSONArray("results") ?: JSONArray()
+                val normalizedResults = JSONArray()
+
+                for (i in 0 until sourceResults.length()) {
+                    val item = sourceResults.optJSONObject(i) ?: continue
+                    normalizedResults.put(
+                        JSONObject()
+                            .put("title", item.optString("title"))
+                            .put("url", item.optString("url"))
+                            .put("content", item.optString("content"))
+                            .put("score", item.optDouble("score", 0.0))
+                            .put("favicon", item.optString("favicon"))
+                    )
+                }
+
+                JSONObject()
+                    .put("query", query)
+                    .put("summary", answer)
+                    .put("result_count", normalizedResults.length())
+                    .put("results", normalizedResults)
+                    .put("source", "tavily")
+                    .put("request_id", json.optString("request_id", ""))
+                    .put("response_time", json.optString("response_time", ""))
+                    .toString()
             } catch (e: Exception) {
-                "Search failed: ${e.message}"
+                performDuckDuckGoSearch(query, priorError = "Tavily request failed: ${e.message}")
             }
         }
     }
 
-    private suspend fun generateResponse(chatId: Long) {
-        _isLoading.value = true
+    private fun parseDuckTopicsInto(
+        topics: JSONArray?,
+        out: JSONArray,
+        maxResults: Int
+    ) {
+        if (topics == null) return
+        for (i in 0 until topics.length()) {
+            if (out.length() >= maxResults) return
+            val item = topics.optJSONObject(i) ?: continue
+            val nested = item.optJSONArray("Topics")
+            if (nested != null) {
+                parseDuckTopicsInto(nested, out, maxResults)
+                continue
+            }
+            val text = item.optString("Text")
+            val url = item.optString("FirstURL")
+            if (text.isBlank()) continue
+            out.put(
+                JSONObject()
+                    .put("title", text.take(96))
+                    .put("url", url)
+                    .put("content", text)
+            )
+        }
+    }
+
+    private suspend fun performDuckDuckGoSearch(query: String, priorError: String? = null): String {
+        return withContext(Dispatchers.IO) {
+            try {
+                val encoded = URLEncoder.encode(query, "UTF-8")
+                val url = "https://api.duckduckgo.com/?q=$encoded&format=json&no_redirect=1&no_html=1&skip_disambig=1"
+                val request = Request.Builder().url(url).get().build()
+                val response = okHttpClient.newCall(request).execute()
+                val bodyStr = response.body?.string().orEmpty()
+
+                val json = JSONObject(bodyStr)
+                val summary = json.optString("AbstractText", "")
+                val heading = json.optString("Heading", "")
+                val abstractUrl = json.optString("AbstractURL", "")
+                val results = JSONArray()
+
+                if (summary.isNotBlank()) {
+                    results.put(
+                        JSONObject()
+                            .put("title", if (heading.isBlank()) "DuckDuckGo Summary" else heading)
+                            .put("url", abstractUrl)
+                            .put("content", summary)
+                    )
+                }
+                parseDuckTopicsInto(json.optJSONArray("RelatedTopics"), results, maxResults = 5)
+
+                JSONObject()
+                    .put("query", query)
+                    .put("summary", summary)
+                    .put("result_count", results.length())
+                    .put("results", results)
+                    .put("source", "duckduckgo_fallback")
+                    .put("fallback_reason", priorError ?: "")
+                    .toString()
+            } catch (e: Exception) {
+                JSONObject()
+                    .put("query", query)
+                    .put("summary", "")
+                    .put("result_count", 0)
+                    .put("results", JSONArray())
+                    .put("error", "Search failed: ${e.message}")
+                    .put("fallback_reason", priorError ?: "")
+                    .toString()
+            }
+        }
+    }
+
+    private fun getWebSearchTools(): List<Tool> {
+        return listOf(
+            Tool(
+                "function",
+                FunctionDetail(
+                    "web_search",
+                    "Search the web for current events or facts",
+                    mapOf(
+                        "type" to "object",
+                        "properties" to mapOf(
+                            "query" to mapOf(
+                                "type" to "string",
+                                "description" to "The search query"
+                            )
+                        ),
+                        "required" to listOf("query")
+                    )
+                )
+            )
+        )
+    }
+
+    private fun extractToolQuery(argumentsRaw: String?, fallbackQuery: String): String {
+        val raw = argumentsRaw?.trim().orEmpty()
+        if (raw.isBlank()) return fallbackQuery
+
+        try {
+            val obj = JSONObject(raw)
+            val fromJson = obj.optString("query", "").trim()
+            if (fromJson.isNotEmpty()) return fromJson
+        } catch (_: Exception) {
+        }
+
+        val quotedMatch = Regex("\"query\"\\s*:\\s*\"([^\"]+)\"").find(raw)?.groupValues?.getOrNull(1)?.trim()
+        if (!quotedMatch.isNullOrEmpty()) return quotedMatch
+
+        val looseMatch = Regex("query\\s*[:=]\\s*['\"]?(.+?)['\"]?$").find(raw)?.groupValues?.getOrNull(1)?.trim()
+        if (!looseMatch.isNullOrEmpty()) return looseMatch
+
+        return fallbackQuery
+    }
+
+    private suspend fun checkToolsAndComplete(
+        apiMessages: MutableList<ApiMessage>,
+        modelToUse: String,
+        maxTokensValue: Int,
+        useLocalEndpoint: Boolean,
+        fallbackQuery: String
+    ): String? {
+        val toolCheckRequest = ChatRequest(
+            model = modelToUse,
+            messages = apiMessages,
+            stream = false,
+            max_tokens = maxTokensValue,
+            tools = getWebSearchTools(),
+            tool_choice = "auto"
+        )
+
+        val blockingResponse: ChatResponse? = if (useLocalEndpoint) {
+            val urlString = buildLocalUrl("/v1/chat/completions")
+            val headers = buildLocalHeaders()
+            if (connectionMode.value == ConnectionMode.Phone) {
+                val remoteRequest = com.example.forgeint.RemoteRequest(
+                    url = urlString,
+                    method = "POST",
+                    headers = headers,
+                    body = Gson().toJson(toolCheckRequest)
+                )
+                val jsonStr = phoneCommunicator.sendRequest(remoteRequest)
+                if (jsonStr != null) try {
+                    Gson().fromJson(jsonStr, ChatResponse::class.java)
+                } catch (_: Exception) {
+                    null
+                } else null
+            } else {
+                apiService.chatLocalBlocking(urlString, headers, toolCheckRequest)
+            }
+        } else {
+            if (connectionMode.value == ConnectionMode.Phone) {
+                val currentKey = if (isCustomApiKeyEnabled.value && apiKey.value.isNotBlank()) apiKey.value else openRouterKey
+                val headers = mapOf(
+                    "Authorization" to "Bearer $currentKey",
+                    "HTTP-Referer" to "https://forgeint.app",
+                    "X-Title" to "ForgeInt"
+                )
+                val remoteRequest = com.example.forgeint.RemoteRequest(
+                    url = "https://openrouter.ai/api/v1/chat/completions",
+                    method = "POST",
+                    headers = headers,
+                    body = Gson().toJson(toolCheckRequest)
+                )
+                val jsonStr = phoneCommunicator.sendRequest(remoteRequest)
+                if (jsonStr != null) try {
+                    Gson().fromJson(jsonStr, ChatResponse::class.java)
+                } catch (_: Exception) {
+                    null
+                } else null
+            } else {
+                val currentKey = if (isCustomApiKeyEnabled.value && apiKey.value.isNotBlank()) apiKey.value else openRouterKey
+                apiService.chatOpenRouterBlocking(
+                    "Bearer $currentKey",
+                    "https://forgeint.app",
+                    "ForgeInt",
+                    toolCheckRequest
+                )
+            }
+        }
+
+        val choice = blockingResponse?.choices?.firstOrNull()
+        val toolCall = choice?.message?.tool_calls?.firstOrNull()
+        if (toolCall?.function?.name == "web_search") {
+            _isWebSearching.value = true
+            val query = extractToolQuery(toolCall.function.arguments, fallbackQuery)
+            val searchResult = try {
+                if (query.isBlank()) {
+                    "Search failed: missing query argument."
+                } else {
+                    performWebSearchByConnection(query)
+                }
+            } finally {
+                _isWebSearching.value = false
+            }
+
+            apiMessages.add(choice.message)
+            apiMessages.add(
+                ApiMessage(
+                    role = "tool",
+                    content = searchResult,
+                    tool_call_id = toolCall.id,
+                    name = "web_search"
+                )
+            )
+
+            return if (useLocalEndpoint) {
+                callLmStudioStream(apiMessages, modelToUse, maxTokensValue)
+            } else {
+                callOpenRouterStream(apiMessages, modelToUse, maxTokensValue)
+            }
+        }
+
+        if (!choice?.message?.content.isNullOrBlank()) {
+            return choice?.message?.content
+        }
+        _isWebSearching.value = false
+        return if (useLocalEndpoint) {
+            callLmStudioStream(apiMessages, modelToUse, maxTokensValue)
+        } else {
+            callOpenRouterStream(apiMessages, modelToUse, maxTokensValue)
+        }
+    }
+
+    private suspend fun generateResponse(chatId: Long, titleSeedUserPrompt: String? = null) {
+        setLoadingState(true)
         _streamingMessage.value = ""
 
         val currentId = selectedPersonaId.value
@@ -1223,7 +1996,7 @@ class GeminiViewModel(application: Application) : AndroidViewModel(application) 
 
         val modelToUse = currentModelId.value.trim()
         val useLocal = isLocalEnabled.value
-        val webSearch = _isWebSearchEnabled.value && !useLocal
+        val webSearch = _isWebSearchEnabled.value
         // Pruning integration: Fetch more messages (e.g., 50)
         val rawHistory = dao.getMessages(chatId, 50).first().reversed()
 
@@ -1236,6 +2009,8 @@ class GeminiViewModel(application: Application) : AndroidViewModel(application) 
         } else {
             rawHistory
         }
+        val latestUserPrompt = rawHistory.lastOrNull { it.isUser }?.text.orEmpty()
+        val relevantConversationContext = buildRelevantConversationContext(chatId, latestUserPrompt)
 
         val traits = traitDao.traitDao().getAllTraits()
         val ltm = traits.filter { it.type == MemoryType.LONG_TERM }
@@ -1268,6 +2043,7 @@ class GeminiViewModel(application: Application) : AndroidViewModel(application) 
         val fullSystemPrompt = StringBuilder()
             .append(persona.systemInstruction)
             .append(memoryContext)
+            .append(relevantConversationContext)
             .append(memoryInstruction)
             .append(sessionTag)
             .append("\n\n[CONSTRAINTS]: Your response must be concise. Aim for a maximum of approximately $approxWordLimit words.")
@@ -1275,26 +2051,20 @@ class GeminiViewModel(application: Application) : AndroidViewModel(application) 
 
         try {
             val fullResponse = if (useLocal) {
-                if (localModelFile.exists()) {
-                    _streamingMessage.value = "Initializing Neural Core..."
-                    withContext(Dispatchers.IO) {
-                        if (!isModelLoaded) {
-                            System.gc()
-                            val loaded = localEngine.loadModel(localModelFile.absolutePath)
-                            if (!loaded) throw IOException("Native Core Failed to Load")
-                            isModelLoaded = true
-                        }
-                        val formattedPrompt = formatGemmaPrompt(fullSystemPrompt, conversationHistory)
-                        withContext(Dispatchers.Main) { _streamingMessage.value = "Thinking..." }
-                        val responseText = localEngine.generateResponse(formattedPrompt)
-                        if (responseText.startsWith("Error:")) throw IOException(responseText) else responseText
-                    }
+                val apiMessages = mutableListOf<ApiMessage>()
+                apiMessages.add(ApiMessage("system", fullSystemPrompt, null))
+                conversationHistory.forEach { message ->
+                    apiMessages.add(ApiMessage(if (message.isUser) "user" else "assistant", message.text.trim(), null))
+                }
+                if (webSearch) {
+                    checkToolsAndComplete(
+                        apiMessages,
+                        modelToUse,
+                        maxTokensValue,
+                        useLocalEndpoint = true,
+                        fallbackQuery = latestUserPrompt
+                    )
                 } else {
-                    val apiMessages = mutableListOf<ApiMessage>()
-                    apiMessages.add(ApiMessage("system", fullSystemPrompt, null))
-                    conversationHistory.forEach { message ->
-                        apiMessages.add(ApiMessage(if (message.isUser) "user" else "assistant", message.text.trim(), null))
-                    }
                     callLmStudioStream(apiMessages, modelToUse, maxTokensValue)
                 }
             } else {
@@ -1305,140 +2075,281 @@ class GeminiViewModel(application: Application) : AndroidViewModel(application) 
                 }
 
                 if (webSearch) {
-                    val tools = listOf(
-                        Tool("function", FunctionDetail(
-                            "web_search",
-                            "Search the web for current events or facts",
-                            mapOf(
-                                "type" to "object",
-                                "properties" to mapOf("query" to mapOf("type" to "string", "description" to "The search query")),
-                                "required" to listOf("query")
-                            )
-                        ))
+                    checkToolsAndComplete(
+                        apiMessages,
+                        modelToUse,
+                        maxTokensValue,
+                        useLocalEndpoint = false,
+                        fallbackQuery = latestUserPrompt
                     )
-
-                    val toolCheckRequest = ChatRequest(
-                        model = modelToUse,
-                        messages = apiMessages,
-                        stream = false,
-                        max_tokens = maxTokensValue,
-                        tools = tools,
-                        tool_choice = "auto"
-                    )
-
-                    val blockingResponse: ChatResponse? = if (connectionMode.value == ConnectionMode.Phone) {
-                         val currentKey = if (isCustomApiKeyEnabled.value && apiKey.value.isNotBlank()) apiKey.value else openRouterKey
-                         val headers = mapOf("Authorization" to "Bearer $currentKey", "HTTP-Referer" to "https://forgeint.app", "X-Title" to "ForgeInt")
-                         val remoteRequest = com.example.forgeint.RemoteRequest(
-                            url = "https://openrouter.ai/api/v1/chat/completions",
-                            method = "POST",
-                            headers = headers,
-                            body = Gson().toJson(toolCheckRequest)
-                        )
-                        val jsonStr = phoneCommunicator.sendRequest(remoteRequest)
-                        if (jsonStr != null) try { Gson().fromJson(jsonStr, ChatResponse::class.java) } catch(e:Exception){null} else null
-                    } else {
-                        val currentKey = if (isCustomApiKeyEnabled.value && apiKey.value.isNotBlank()) apiKey.value else openRouterKey
-                        apiService.chatOpenRouterBlocking(
-                            "Bearer $currentKey", "https://forgeint.app", "ForgeInt", toolCheckRequest
-                        )
-                    }
-
-                    val choice = blockingResponse?.choices?.firstOrNull()
-                    val toolCalls = choice?.message?.tool_calls
-
-                    if (toolCalls != null && toolCalls.isNotEmpty()) {
-                        val toolCall = toolCalls.first()
-                        if (toolCall.function.name == "web_search") {
-                            _streamingMessage.value = "Searching the web..."
-                            val args = JSONObject(toolCall.function.arguments)
-                            val query = args.optString("query")
-
-                            val searchResult = if (connectionMode.value == ConnectionMode.Phone) {
-                                val jsonBody = JSONObject().put("query", query).put("include_answer", true).put("topic", "general").toString()
-                                val headers = mapOf("Authorization" to "Bearer $tavilyApiKey", "Content-Type" to "application/json")
-                                val rr = com.example.forgeint.RemoteRequest("https://api.tavily.com/search", "POST", headers, jsonBody)
-                                val resp = phoneCommunicator.sendRequest(rr) ?: "{}"
-                                val bodyStr = resp
-                                
-                                // Duplicate parsing logic from performWebSearch
-                                if (bodyStr.isNotBlank()) {
-                                    val responseJson = JSONObject(bodyStr)
-                                    val results = responseJson.optJSONArray("results")
-                                    val answer = responseJson.optString("answer", "")
-                                    val sb = StringBuilder()
-                                    if (answer.isNotEmpty()) sb.append("Summary: $answer\n\n")
-                                    if (results != null) {
-                                        for (i in 0 until results.length()) {
-                                            val item = results.getJSONObject(i)
-                                            sb.append("Title: ${item.optString("title")}\n")
-                                            sb.append("URL: ${item.optString("url")}\n")
-                                            sb.append("Content: ${item.optString("content")}\n\n")
-                                        }
-                                    }
-                                    sb.toString()
-                                } else "No results."
-                            } else {
-                                performWebSearch(query)
-                            }
-
-                            apiMessages.add(choice.message)
-                            apiMessages.add(ApiMessage(
-                                role = "tool",
-                                content = searchResult,
-                                tool_call_id = toolCall.id,
-                                name = "web_search"
-                            ))
-
-                            callOpenRouterStream(apiMessages, modelToUse, maxTokensValue)
-                        } else {
-                            choice.message.content ?: ""
-                        }
-                    } else {
-                        if (choice?.message?.content != null) {
-                            choice.message.content
-                        } else {
-                            callOpenRouterStream(apiMessages, modelToUse, maxTokensValue)
-                        }
-                    }
                 } else {
                     callOpenRouterStream(apiMessages, modelToUse, maxTokensValue)
                 }
             }
 
             if (!fullResponse.isNullOrBlank()) {
-                dao.insertMessage(Message(conversationId = chatId, text = fullResponse, isUser = false))
+                val assistantMessageId = dao.insertMessage(Message(conversationId = chatId, text = fullResponse, isUser = false))
+                queueEmbeddingForMessage(assistantMessageId, fullResponse)
+                if (!titleSeedUserPrompt.isNullOrBlank()) {
+                    val aiTitle = generateConversationTitle(
+                        userPrompt = titleSeedUserPrompt,
+                        assistantResponse = fullResponse
+                    )
+                    if (!aiTitle.isNullOrBlank()) {
+                        dao.updateConversationSummary(chatId, aiTitle)
+                    }
+                }
             } else {
-                dao.insertMessage(Message(conversationId = chatId, text = "No response generated.", isUser = false))
+                val assistantMessageId = dao.insertMessage(Message(conversationId = chatId, text = "No response generated.", isUser = false))
+                queueEmbeddingForMessage(assistantMessageId, "No response generated.")
             }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
-            dao.insertMessage(Message(conversationId = chatId, text = "Error: ${e.message}", isUser = false))
-            if (useLocal && localModelFile.exists()) {
-                isModelLoaded = false
+            if (!stopRequested) {
+                val assistantMessageId = dao.insertMessage(Message(conversationId = chatId, text = "Error: ${e.message}", isUser = false))
+                queueEmbeddingForMessage(assistantMessageId, "Error: ${e.message}")
             }
         } finally {
+            _isWebSearching.value = false
+            _isThinking.value = false
             _streamingMessage.value = null
-            _isLoading.value = false
+            setLoadingState(false)
+            stopRequested = false
+            activeResponseJob = null
+        }
+    }
+
+    private suspend fun generateConversationTitle(userPrompt: String, assistantResponse: String): String? {
+        val modelToUse = currentModelId.value.trim()
+        val useLocal = isLocalEnabled.value
+        val prompt = """
+            Create a concise title for this conversation.
+            Rules:
+            - 3 to 7 words
+            - No quotes
+            - No punctuation except hyphen if needed
+            - Return only the title
+
+            User: ${userPrompt.trim().take(320)}
+            Assistant: ${assistantResponse.trim().take(480)}
+        """.trimIndent()
+
+        val request = ChatRequest(
+            model = modelToUse,
+            messages = listOf(ApiMessage("user", prompt, null)),
+            stream = false,
+            max_tokens = 24,
+            temperature = 0.2
+        )
+
+        val rawTitle: String? = try {
+            if (useLocal) {
+                val urlString = buildLocalUrl("/v1/chat/completions")
+                val headers = buildLocalHeaders()
+
+                if (connectionMode.value == ConnectionMode.Phone) {
+                    val remoteRequest = com.example.forgeint.RemoteRequest(
+                        url = urlString,
+                        method = "POST",
+                        headers = headers,
+                        body = Gson().toJson(request)
+                    )
+                    val jsonStr = phoneCommunicator.sendRequest(remoteRequest)
+                    if (jsonStr != null) {
+                        try {
+                            Gson().fromJson(jsonStr, ChatResponse::class.java)
+                                ?.choices?.firstOrNull()?.message?.content
+                        } catch (_: Exception) {
+                            null
+                        }
+                    } else {
+                        null
+                    }
+                } else {
+                    apiService.chatLocalBlocking(urlString, headers, request)
+                        .choices.firstOrNull()?.message?.content
+                }
+            } else {
+                val currentKey = if (isCustomApiKeyEnabled.value && apiKey.value.isNotBlank()) apiKey.value else openRouterKey
+                if (connectionMode.value == ConnectionMode.Phone) {
+                    val headers = mapOf(
+                        "Authorization" to "Bearer $currentKey",
+                        "HTTP-Referer" to "https://forgeint.app",
+                        "X-Title" to "ForgeInt"
+                    )
+                    val remoteRequest = com.example.forgeint.RemoteRequest(
+                        url = "https://openrouter.ai/api/v1/chat/completions",
+                        method = "POST",
+                        headers = headers,
+                        body = Gson().toJson(request)
+                    )
+                    val jsonStr = phoneCommunicator.sendRequest(remoteRequest)
+                    if (jsonStr != null) {
+                        try {
+                            Gson().fromJson(jsonStr, ChatResponse::class.java)
+                                ?.choices?.firstOrNull()?.message?.content
+                        } catch (_: Exception) {
+                            null
+                        }
+                    } else {
+                        null
+                    }
+                } else {
+                    apiService.chatOpenRouterBlocking(
+                        "Bearer $currentKey",
+                        "https://forgeint.app",
+                        "ForgeInt",
+                        request
+                    ).choices.firstOrNull()?.message?.content
+                }
+            }
+        } catch (_: Exception) {
+            null
+        }
+
+        return rawTitle
+            ?.takeUnless { it.startsWith("Error:", ignoreCase = true) }
+            ?.lineSequence()
+            ?.firstOrNull { it.isNotBlank() }
+            ?.replace("\"", "")
+            ?.replace("'", "")
+            ?.replace(Regex("[^A-Za-z0-9\\-\\s]"), "")
+            ?.replace(Regex("\\s+"), " ")
+            ?.trim()
+            ?.take(56)
+            ?.takeIf { it.length >= 3 }
+    }
+
+    private suspend fun generateContextCarryoverSummary(
+        conversationTitle: String,
+        history: List<Message>,
+        telemetry: VramTelemetry?
+    ): String? {
+        val modelToUse = currentModelId.value.trim()
+        val useLocal = isLocalEnabled.value
+        val summaryRequestMessages = mutableListOf<ApiMessage>().apply {
+            add(
+                ApiMessage(
+                    "system",
+                    """
+                    Summarize the conversation so it can continue in a fresh chat with lower context usage.
+                    Keep the output compact and practical.
+                    Include:
+                    - key user goals or unresolved questions
+                    - important factual details and preferences
+                    - current task status or next step
+                    - anything the assistant must remember to continue accurately
+                    Return plain text only.
+                    """.trimIndent(),
+                    null
+                )
+            )
+            add(
+                ApiMessage(
+                    "user",
+                    buildString {
+                        appendLine("Conversation title: ${conversationTitle.ifBlank { "Untitled conversation" }}")
+                        telemetry?.let { appendLine("VRAM trigger: ${it.describePressure()}") }
+                        appendLine("Conversation transcript:")
+                        history.forEach { message ->
+                            append(if (message.isUser) "User: " else "Assistant: ")
+                            appendLine(message.text.trim())
+                        }
+                    },
+                    null
+                )
+            )
+        }
+
+        val request = ChatRequest(
+            model = modelToUse,
+            messages = summaryRequestMessages,
+            stream = false,
+            max_tokens = 500,
+            temperature = 0.2
+        )
+
+        val rawSummary = executeBlockingChatRequest(request, useLocal)
+            ?.choices
+            ?.firstOrNull()
+            ?.message
+            ?.content
+            ?.trim()
+            .orEmpty()
+
+        return rawSummary
+            .takeIf { it.isNotBlank() }
+            ?.takeUnless { it.startsWith("Error:", ignoreCase = true) }
+    }
+
+    private fun buildCarryoverSeedMessage(summary: String, telemetry: VramTelemetry?): String {
+        return buildString {
+            appendLine("[Automatic context rollover]")
+            appendLine("This chat was continued in a fresh thread after sustained high VRAM usage.")
+            telemetry?.let { appendLine("VRAM trigger: ${it.describePressure()}") }
+            appendLine()
+            append(summary.trim())
+        }.trim()
+    }
+
+    private suspend fun executeBlockingChatRequest(
+        request: ChatRequest,
+        useLocal: Boolean
+    ): ChatResponse? {
+        return try {
+            if (useLocal) {
+                val urlString = buildLocalUrl("/v1/chat/completions")
+                val headers = buildLocalHeaders()
+
+                if (connectionMode.value == ConnectionMode.Phone) {
+                    val remoteRequest = com.example.forgeint.RemoteRequest(
+                        url = urlString,
+                        method = "POST",
+                        headers = headers,
+                        body = Gson().toJson(request)
+                    )
+                    val jsonStr = phoneCommunicator.sendRequest(remoteRequest)
+                    if (jsonStr != null) Gson().fromJson(jsonStr, ChatResponse::class.java) else null
+                } else {
+                    apiService.chatLocalBlocking(urlString, headers, request)
+                }
+            } else {
+                val currentKey = if (isCustomApiKeyEnabled.value && apiKey.value.isNotBlank()) apiKey.value else openRouterKey
+                if (connectionMode.value == ConnectionMode.Phone) {
+                    val headers = mapOf(
+                        "Authorization" to "Bearer $currentKey",
+                        "HTTP-Referer" to "https://forgeint.app",
+                        "X-Title" to "ForgeInt"
+                    )
+                    val remoteRequest = com.example.forgeint.RemoteRequest(
+                        url = "https://openrouter.ai/api/v1/chat/completions",
+                        method = "POST",
+                        headers = headers,
+                        body = Gson().toJson(request)
+                    )
+                    val jsonStr = phoneCommunicator.sendRequest(remoteRequest)
+                    if (jsonStr != null) Gson().fromJson(jsonStr, ChatResponse::class.java) else null
+                } else {
+                    apiService.chatOpenRouterBlocking(
+                        "Bearer $currentKey",
+                        "https://forgeint.app",
+                        "ForgeInt",
+                        request
+                    )
+                }
+            }
+        } catch (e: Exception) {
+            android.util.Log.e(TAG, "Blocking chat request failed", e)
+            null
         }
     }
 
     private suspend fun callLmStudioStream(messages: List<ApiMessage>, modelId: String, maxTokens: Int): String? {
-        val host = currentHostIp.value
-        val port = currentPort.value
-        val cleanHost = host.removePrefix("https://").removePrefix("http://").trim('/')
-        val isTunnel = cleanHost.contains("cloudflare") || cleanHost.contains("ngrok") || cleanHost.contains("loclx")
-
-        val urlString = if (isTunnel) {
-            "https://$cleanHost/v1/chat/completions"
-        } else {
-            "http://$cleanHost:$port/v1/chat/completions"
-        }
-
-        val headers = HashMap<String, String>()
-        if (isTunnel) {
-            headers["ngrok-skip-browser-warning"] = "true"
+        val urlString = buildLocalUrl("/v1/chat/completions")
+        val headers = buildLocalHeaders()
+        if (isTunnelHost(currentHostIp.value.removePrefix("https://").removePrefix("http://").trim('/').lowercase())) {
             headers["cf-terminate-connection"] = "true"
-            headers["User-Agent"] = "ForgeIntApp"
         }
 
         val request = ChatRequest(model = modelId, messages = messages, temperature = 0.7, stream = true, max_tokens = maxTokens)
@@ -1506,38 +2417,49 @@ class GeminiViewModel(application: Application) : AndroidViewModel(application) 
 
     private suspend fun processStream(responseBody: ResponseBody): String {
         val fullResponse = StringBuilder()
+        var lastUiUpdateAt = 0L
+        var lastRenderedText: String? = null
+        var lastThinkingState = false
+
+        fun buildRenderState(raw: String): Pair<Boolean, String> {
+            val thinkStart = raw.indexOf("<think>")
+            val thinkEnd = raw.indexOf("</think>")
+            return if (thinkStart != -1 && thinkEnd == -1) {
+                true to raw.substring(0, thinkStart)
+            } else if (thinkStart != -1 && thinkEnd != -1) {
+                false to (raw.substring(0, thinkStart) + raw.substring(thinkEnd + 8))
+            } else {
+                false to raw
+            }
+        }
+
         withContext(Dispatchers.IO) {
             responseBody.source().use { source ->
                 while (!source.exhausted()) {
                     val line = source.readUtf8Line() ?: break
-                    val content = parseStreamChunkNative(line)
+                    val content = parseStreamChunkSafe(line)
                     if (content != null) {
                         fullResponse.append(content)
-                        val currentString = fullResponse.toString()
+                        val (thinkingNow, visibleText) = buildRenderState(fullResponse.toString())
+                        val now = SystemClock.elapsedRealtime()
+                        val frameOpen = (now - lastUiUpdateAt) >= STREAM_UI_FRAME_MS
+                        val thinkingChanged = thinkingNow != lastThinkingState
+                        val textChanged = visibleText != lastRenderedText
 
-                        val thinkStart = currentString.indexOf("<think>")
-                        val thinkEnd = currentString.indexOf("</think>")
-
-                        if (thinkStart != -1 && thinkEnd == -1) {
-                            // Thinking in progress
-                            if (!_isThinking.value) _isThinking.value = true
-                            // Show text before the tag
-                            _streamingMessage.value = currentString.substring(0, thinkStart)
-                        } else if (thinkStart != -1 && thinkEnd != -1) {
-                            // Thinking finished
-                            if (_isThinking.value) _isThinking.value = false
-                            
-                            val preThink = currentString.substring(0, thinkStart)
-                            val postThink = currentString.substring(thinkEnd + 8) // </think> is 8 chars
-                            _streamingMessage.value = preThink + postThink
-                        } else {
-                            // No thinking tags
-                            _isThinking.value = false
-                            _streamingMessage.value = currentString
+                        if (thinkingChanged || (frameOpen && textChanged)) {
+                            _isThinking.value = thinkingNow
+                            _streamingMessage.value = visibleText
+                            lastThinkingState = thinkingNow
+                            lastRenderedText = visibleText
+                            lastUiUpdateAt = now
                         }
                     }
                 }
             }
+        }
+        val (_, finalVisibleText) = buildRenderState(fullResponse.toString())
+        if (finalVisibleText != lastRenderedText) {
+            _streamingMessage.value = finalVisibleText
         }
         _isThinking.value = false
         return fullResponse.toString()
@@ -1576,6 +2498,21 @@ interface GeminiApiService {
         @HeaderMap headers: Map<String, String>,
         @Body request: ChatRequest
     ): ChatResponse
+
+    @POST("embeddings")
+    suspend fun embeddingsOpenRouter(
+        @Header("Authorization") auth: String,
+        @Header("HTTP-Referer") referer: String,
+        @Header("X-Title") title: String,
+        @Body request: EmbeddingRequest
+    ): EmbeddingResponse
+
+    @POST
+    suspend fun embeddingsLocal(
+        @Url url: String,
+        @HeaderMap headers: Map<String, String>,
+        @Body request: EmbeddingRequest
+    ): EmbeddingResponse
 }
 
 data class ChatRequest(
@@ -1586,6 +2523,19 @@ data class ChatRequest(
     @SerializedName("stream") val stream: Boolean? = false,
     @SerializedName("tools") val tools: List<Tool>? = null,
     @SerializedName("tool_choice") val tool_choice: String? = null
+)
+
+data class EmbeddingRequest(
+    @SerializedName("model") val model: String,
+    @SerializedName("input") val input: String
+)
+
+data class EmbeddingResponse(
+    @SerializedName("data") val data: List<EmbeddingData>
+)
+
+data class EmbeddingData(
+    @SerializedName("embedding") val embedding: List<Double>
 )
 
 data class ChatResponse(

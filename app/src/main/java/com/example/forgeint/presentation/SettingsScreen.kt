@@ -12,8 +12,8 @@ import androidx.compose.material.icons.filled.AccountTree
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.BroadcastOnPersonal
 import androidx.compose.material.icons.filled.DeviceThermostat
+import androidx.compose.material.icons.filled.ShowChart
 import androidx.compose.material.icons.filled.Person
-import androidx.compose.material.icons.filled.PrivateConnectivity
 import androidx.compose.material.icons.filled.SaveAlt
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.WifiFind
@@ -26,11 +26,11 @@ import androidx.wear.compose.material.Vignette
 import androidx.wear.compose.material.VignettePosition
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.graphics.Color
@@ -75,6 +75,39 @@ import kotlinx.coroutines.launch
 import androidx.compose.foundation.gestures.scrollBy
 import androidx.wear.compose.material.items as materialItems
 
+fun formatModelDisplayName(modelId: String): String {
+    val rawName = modelId.substringAfter('/', "").substringBefore(':')
+    if (rawName.isBlank()) return modelId.ifBlank { "Unknown model" }
+
+    val hiddenTokens = setOf("instruct", "chat", "preview", "latest", "it")
+    val tokens = rawName
+        .split('-', '_')
+        .filter { it.isNotBlank() && it.lowercase() !in hiddenTokens }
+
+    if (tokens.isEmpty()) return modelId
+
+    return tokens.joinToString(" ") { token ->
+        when {
+            token.all { it.isDigit() || it == '.' } -> token
+            token.length <= 3 -> token.uppercase()
+            else -> token.replaceFirstChar { c ->
+                if (c.isLowerCase()) c.titlecase() else c.toString()
+            }
+        }
+    }
+}
+
+@Composable
+private fun SettingsSectionHeader(title: String) {
+    val colors = LocalForgeIntColors.current
+    Text(
+        text = title,
+        style = MaterialTheme.typography.caption1,
+        color = colors.settingsIcon,
+        modifier = Modifier.padding(top = 4.dp, bottom = 2.dp)
+    )
+}
+
 
 @Composable
 fun SettingsScreen(
@@ -84,50 +117,36 @@ fun SettingsScreen(
     allPersonas: List<Persona>,
     onToggleLite: (Boolean) -> Unit,
     onToggleVoiceDominant: (Boolean) -> Unit,
-    onNavigateToModelSelect: () -> Unit,
-    onNavigateToPersona: () -> Unit,
+    onNavigateToModelSettings: () -> Unit,
     onNavigateToIP: () -> Unit,
-    onNavigateToLocalModel: () -> Unit,
     onNavigateToNeuralNetwork: () -> Unit,
     onNavigateToSystem: () -> Unit,
-    onNavigateToMessageLength: () -> Unit,
-    onNavigateToApiKey: () -> Unit,
 
     onNavigateToTheme: () -> Unit,
     onNavigateToLocalStatus: () -> Unit,
-    onNavigateToHardwareMonitor: () -> Unit
+    onNavigateToHardwareMonitor: () -> Unit,
+    onNavigateToGradientDescent: () -> Unit,
+    onNavigateToRemoteCommand: () -> Unit
 ) {
     val listState = rememberTransformingLazyColumnState()
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
     val settingsManager = remember { SettingsManager(context) }
-    val personaId by settingsManager.selectedPersonaId.collectAsState(initial = "default")
-    val modelId by settingsManager.selectedModel.collectAsState(initial = "google/gemma-3n-e4b-it:free")
-    val connectionTypeID by settingsManager.isLocalEnabled.collectAsState(initial = false)
-    val messageLength by settingsManager.messageLength.collectAsState(initial = "Normal")
-    val currentTheme by settingsManager.appTheme.collectAsState(initial = "Default")
+    val personaId by settingsManager.selectedPersonaId.collectAsStateWithLifecycle(initialValue = "default")
+    val modelId by settingsManager.selectedModel.collectAsStateWithLifecycle(initialValue = SettingsManager.DEFAULT_CLOUD_MODEL_ID)
+    val connectionTypeID by settingsManager.isLocalEnabled.collectAsStateWithLifecycle(initialValue = false)
+    val isFunnelEnabled by settingsManager.isFunnelEnabled.collectAsStateWithLifecycle(initialValue = false)
+    val messageLength by settingsManager.messageLength.collectAsStateWithLifecycle(initialValue = "Normal")
+    val currentTheme by settingsManager.appTheme.collectAsStateWithLifecycle(initialValue = "Default")
+    val isAutoPowerSavingMode by settingsManager.isAutoPowerSavingMode.collectAsStateWithLifecycle(initialValue = false)
     val colors = LocalForgeIntColors.current
 
-    val connectionType = if (connectionTypeID) "Local Server" else "Openrouter API"
-    val currentModelName = remember(modelId) {
-        when (modelId) {
-            "google/gemma-3n-e4b-it:free" -> "Gemma E4B"
-            "google/gemma-3-27b-it:free" -> "Gemma 3.27B"
-            "google/gemma-2-9b-it:free" -> "Gemma 3.9B"
-            "google/gemma-3n-e2b-it:free" -> "Gemma E2B"
-            "local/gemma-270m" -> "Gemma 270M (local)"
-            "qwen/qwen3-4b:free" -> "Qwen 4B"
-            "meta-llama/llama-3.3-70b-instruct:free" -> "Llama 3.3 70B"
-            "openai/gpt-oss-120b:free" -> "GPT OSS 120B"
-
-
-            "openai/gpt-oss-20b:free" -> "GPT OSS 20B"
-            "cognitivecomputations/dolphin-mistral-24b-venice-edition:free" -> "Dolphin Mistral 24B"
-            else -> "Unknown Model"
-
-
-        }
+    val connectionType = when {
+        connectionTypeID && isFunnelEnabled -> "Local Server (Funnel)"
+        connectionTypeID -> "Local Server"
+        else -> "Openrouter API"
     }
+    val currentModelName = remember(modelId) { formatModelDisplayName(modelId) }
     val currentPersonaName = remember(personaId, allPersonas) {
         allPersonas.find { it.id == personaId }?.name ?: Personas.findById(personaId).name
     }
@@ -160,7 +179,7 @@ fun SettingsScreen(
                 Text("Settings", style = MaterialTheme.typography.title3, color = colors.botText)
             }
 
-            // 1. Lite Mode Toggle
+            item { SettingsSectionHeader("Power & Behavior") }
             item {
                 ToggleChip(
                     checked = isLiteMode,
@@ -175,6 +194,37 @@ fun SettingsScreen(
                         uncheckedStartBackgroundColor = colors.surface,
                         uncheckedEndBackgroundColor = colors.surface
 
+                    )
+                )
+            }
+
+            item {
+                ToggleChip(
+                    checked = isAutoPowerSavingMode,
+                    onCheckedChange = { enabled ->
+                        coroutineScope.launch {
+                            settingsManager.setAutoPowerSavingMode(enabled)
+                        }
+                    },
+                    label = { Text("Auto Power Saving") },
+                    secondaryLabel = {
+                        Text(
+                            if (isAutoPowerSavingMode) {
+                                "Below 20%: enable power saving + OLED"
+                            } else {
+                                "Trigger battery saver automatically"
+                            }
+                        )
+                    },
+                    toggleControl = {
+                        Switch(checked = isAutoPowerSavingMode, onCheckedChange = null)
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = ToggleChipDefaults.toggleChipColors(
+                        checkedStartBackgroundColor = Color(0xFF102300),
+                        checkedEndBackgroundColor = Color(0xFF3E5200),
+                        uncheckedStartBackgroundColor = colors.surface,
+                        uncheckedEndBackgroundColor = colors.surface
                     )
                 )
             }
@@ -197,15 +247,15 @@ fun SettingsScreen(
                 )
             }
 
-            // 2. Model Selection Button
+            item { SettingsSectionHeader("Core AI") }
             item {
                 Chip(
-                    onClick = onNavigateToModelSelect,
-                    label = { Text("AI Model", color = colors.botText) },
+                    onClick = onNavigateToModelSettings,
+                    label = { Text("Model Settings", color = colors.botText) },
                     secondaryLabel = {
                         Text(
-                            currentModelName,
-                            maxLines = 1,
+                            "$currentModelName • $currentPersonaName • $messageLength",
+                            maxLines = 2,
                             overflow = TextOverflow.Ellipsis,
                             color = colors.userText
                         )
@@ -218,6 +268,7 @@ fun SettingsScreen(
                     modifier = Modifier.fillMaxWidth()
                 )
             }
+            item { SettingsSectionHeader("Appearance") }
             item {
                 Chip(
                     onClick = onNavigateToTheme,
@@ -238,70 +289,11 @@ fun SettingsScreen(
                     modifier = Modifier.fillMaxWidth()
                 )
             }
-            item {
-                Chip(
-                    onClick = onNavigateToPersona,
-                    label = { Text("AI Persona", color = colors.botText) },
-                    secondaryLabel = {
-                        Text(
-                            currentPersonaName,
-                            maxLines = 2,
-                            overflow = TextOverflow.Ellipsis,
-                            color = colors.userText
-                        )
-                    },
-                    icon = { Icon(Icons.Default.Person, "Persona", tint = colors.replyIcon) },
-                    colors = ChipDefaults.gradientBackgroundChipColors(
-                        startBackgroundColor = colors.userBubble,
-                        endBackgroundColor = colors.surface
-                    ),
-                    modifier = Modifier.fillMaxWidth()
-                )
-            }
-            item {
-                Chip(
-                    onClick = onNavigateToMessageLength,
-                    label = { Text("Response Length", color = colors.botText) },
-                    secondaryLabel = {
-                        Text(
-                            messageLength,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            color = colors.userText
-                        )
-                    },
-                    icon = { Icon(Icons.Default.Settings, "Response Length", tint = colors.primary) },
-                    colors = ChipDefaults.gradientBackgroundChipColors(
-                        startBackgroundColor = colors.userBubble,
-                        endBackgroundColor = colors.surface
-                    ),
-                    modifier = Modifier.fillMaxWidth()
-                )
-            }
-            item {
-                Chip(
-                    onClick = onNavigateToApiKey,
-                    label = { Text("API Key", color = colors.botText) },
-                    secondaryLabel = {
-                        Text(
-                            "Manage Custom API Key",
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            color = colors.userText
-                        )
-                    },
-                    icon = { Icon(Icons.Default.PrivateConnectivity, "API Key", tint = colors.settingsIcon) },
-                    colors = ChipDefaults.gradientBackgroundChipColors(
-                        startBackgroundColor = colors.userBubble,
-                        endBackgroundColor = colors.surface
-                    ),
-                    modifier = Modifier.fillMaxWidth()
-                )
-            }
+            item { SettingsSectionHeader("Connection") }
             item {
                 Chip(
                     onClick = onNavigateToIP,
-                    label = { Text("Connection Type", color = colors.botText) },
+                    label = { Text("Connection Settings", color = colors.botText) },
                     secondaryLabel = {
                         Text(
                             connectionType,
@@ -318,6 +310,28 @@ fun SettingsScreen(
                     modifier = Modifier.fillMaxWidth()
                 )
             }
+//            item {
+//                Chip(
+//                    onClick = onNavigateToLocalStatus,
+//                    label = { Text("Local Server Status", color = colors.botText) },
+//                    secondaryLabel = {
+//                        Text(
+//                            "Check server health and availability",
+//                            maxLines = 1,
+//                            overflow = TextOverflow.Ellipsis,
+//                            color = colors.userText
+//                        )
+//                    },
+//                    icon = { Icon(Icons.Default.Settings, "Local status", tint = colors.settingsIcon) },
+//                    colors = ChipDefaults.gradientBackgroundChipColors(
+//                        startBackgroundColor = colors.userBubble,
+//                        endBackgroundColor = colors.surface
+//                    ),
+//                    modifier = Modifier.fillMaxWidth()
+//                )
+//            }
+            item { SettingsSectionHeader("Device & Tools") }
+
             item {
                 Chip(
                     onClick = onNavigateToSystem,
@@ -358,7 +372,66 @@ fun SettingsScreen(
                     modifier = Modifier.fillMaxWidth()
                 )
             }
-
+            item {
+                Chip(
+                    onClick = onNavigateToRemoteCommand,
+                    label = { Text("Remote Control", color = colors.botText) },
+                    secondaryLabel = {
+                        Text(
+                            "Send Flask commands to the hardcoded host",
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                            color = colors.userText
+                        )
+                    },
+                    icon = { Icon(Icons.Default.Computer, "Remote Control", tint = colors.replyIcon) },
+                    colors = ChipDefaults.gradientBackgroundChipColors(
+                        startBackgroundColor = colors.botBubble,
+                        endBackgroundColor = colors.surface
+                    ),
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+            item {
+                Chip(
+                    onClick = onNavigateToGradientDescent,
+                    label = { Text("Gradient Descent", color = colors.botText) },
+                    secondaryLabel = {
+                        Text(
+                            "Canvas Math Demo",
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            color = colors.userText
+                        )
+                    },
+                    icon = { Icon(Icons.Default.ShowChart, "Gradient Descent", tint = colors.primary) },
+                    colors = ChipDefaults.gradientBackgroundChipColors(
+                        startBackgroundColor = colors.userBubble,
+                        endBackgroundColor = colors.surface
+                    ),
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+            item {
+                Chip(
+                    onClick = onNavigateToNeuralNetwork,
+                    label = { Text("Neural Network", color = colors.botText) },
+                    secondaryLabel = {
+                        Text(
+                            "Experimental math demo",
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            color = colors.userText
+                        )
+                    },
+                    icon = { Icon(Icons.Default.BroadcastOnPersonal, "Neural Network", tint = colors.replyIcon) },
+                    colors = ChipDefaults.gradientBackgroundChipColors(
+                        startBackgroundColor = colors.userBubble,
+                        endBackgroundColor = colors.surface
+                    ),
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
 
 
 
@@ -378,6 +451,8 @@ fun MessageLengthSelectionScreen(
     val focusRequester = remember { FocusRequester() }
     val lengths = remember { listOf("Shorter", "Normal", "Longer") }
     val colors = LocalForgeIntColors.current
+    val selectedStartColor = colors.primary.copy(alpha = 0.24f)
+    val selectedEndColor = colors.surface.copy(alpha = 0.96f)
 
     LaunchedEffect(Unit) {
         focusRequester.requestFocus()
@@ -406,7 +481,7 @@ fun MessageLengthSelectionScreen(
                 Text(
                     "Response Length",
                     style = MaterialTheme.typography.caption1,
-                    color = colors.onPrimary
+                    color = colors.botText
                 )
             }
 
@@ -422,9 +497,9 @@ fun MessageLengthSelectionScreen(
                     },
                     modifier = Modifier.fillMaxWidth(),
                     colors = ToggleChipDefaults.toggleChipColors(
-                        checkedStartBackgroundColor = Color(0xFF081A36),
-                        checkedEndBackgroundColor = Color(0xFF5C4D00),
-                        uncheckedStartBackgroundColor = colors.surface,
+                        checkedStartBackgroundColor = selectedStartColor,
+                        checkedEndBackgroundColor = selectedEndColor,
+                        uncheckedStartBackgroundColor = colors.userBubble,
                         uncheckedEndBackgroundColor = colors.surface
                     )
                 )
@@ -443,8 +518,8 @@ fun SystemMonitorSettings(
     val focusRequester = remember { FocusRequester() }
     val context = LocalContext.current
     val settingsManager = remember { SettingsManager(context) }
-    val memory_monitor by settingsManager.isMemoryMonitorEnabled.collectAsState(false)
-    val thermal_monitor by settingsManager.isSystemTelemetryEnabled.collectAsState(false)
+    val memory_monitor by settingsManager.isMemoryMonitorEnabled.collectAsStateWithLifecycle(initialValue = false)
+    val thermal_monitor by settingsManager.isSystemTelemetryEnabled.collectAsStateWithLifecycle(initialValue = false)
     val colors = LocalForgeIntColors.current
 
     LaunchedEffect(Unit) {
@@ -523,8 +598,8 @@ fun ApiKeySettingsScreen(
     val focusRequester = remember { FocusRequester() }
     val context = LocalContext.current
     val settingsManager = remember { SettingsManager(context) }
-    val isCustomKeyEnabled by settingsManager.isCustomApiKeyEnabled.collectAsState(false)
-    val currentApiKey by settingsManager.apiKey.collectAsState("")
+    val isCustomKeyEnabled by settingsManager.isCustomApiKeyEnabled.collectAsStateWithLifecycle(initialValue = false)
+    val currentApiKey by settingsManager.apiKey.collectAsStateWithLifecycle(initialValue = "")
     val colors = LocalForgeIntColors.current
 
     val launcher = rememberTextInputLauncher(onInputReceived = onApiKeyChanged)
@@ -632,7 +707,9 @@ fun ModelSelectionScreen(
 
     val defaultModels = remember {
         listOf(
-            AiModel("google/gemma-3n-e4b-it:free", "Gemma 3N E4B", "Multimodal: Video, Audio & Mobile efficiency"),
+            AiModel(SettingsManager.DEFAULT_CLOUD_MODEL_ID, "Gemma 3N E4B", "Multimodal: Video, Audio & Mobile efficiency"),
+            AiModel("openrouter/free", "Auto", "Chooses a random available model"),
+            AiModel("minimax/minimax-m2.5:free", "Minimax 2.5", "MiniMax-M2.5 is a SOTA large language model designed for real-world productivity."),
             AiModel("qwen/qwen3-4b:free", "Qwen 4B", "High-speed reasoning & Multilingual coding"),
             AiModel("z-ai/glm-4.5-air:free", "GLM 4.5", "Agentic workflows & Native tool-calling"),
             AiModel("meta-llama/llama-3.1-405b-instruct:free", "Llama 3.1 405B", "Frontier-level intelligence & massive scale reasoning"),
@@ -821,6 +898,9 @@ fun ThemeSelectionScreen(
             "Midnight Blue", "Forest Deep", "Slate Gray", "Royal Gold",
             "Neon Violet", "Nature", "Minimal", "OLED", "Matrix",
             "Solarized", "Cotton Candy", "High Contrast",
+            "Ocean Breeze", "Volcanic Ash", "Mint Chocolate", "Electric Indigo",
+            "Desert Sand", "Cosmic Nebula", "Autumn Leaves", "Glacier White",
+            "Abyssal Depths", "Retro 80s"
         )
     }
 
@@ -877,6 +957,16 @@ fun ThemeSelectionScreen(
                     "Slate Gray" -> Color(0xFF90A4AE)
                     "Royal Gold" -> Color(0xFFFFD700)
                     "Neon Violet" -> Color(0xFFD500F9)
+                    "Ocean Breeze" -> Color(0xFF64FFDA)
+                    "Volcanic Ash" -> Color(0xFFFF3D00)
+                    "Mint Chocolate" -> Color(0xFF98FF98)
+                    "Electric Indigo" -> Color(0xFF6600FF)
+                    "Desert Sand" -> Color(0xFFE4A010)
+                    "Cosmic Nebula" -> Color(0xFFFF007F)
+                    "Autumn Leaves" -> Color(0xFFFF5722)
+                    "Glacier White" -> Color(0xFFE0F7FA)
+                    "Abyssal Depths" -> Color(0xFF00FFCC)
+                    "Retro 80s" -> Color(0xFFFF00FF)
                     else -> Color.Gray
                 }
 
@@ -930,3 +1020,5 @@ data class ModelQuota(
                 ModelQuota("gemini-2.5-pro", 25),
                 ModelQuota("gemini-3-flash-preview", 1500)
             )
+
+

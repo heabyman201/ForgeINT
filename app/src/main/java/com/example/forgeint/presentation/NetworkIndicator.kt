@@ -15,8 +15,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Smartphone
 import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -32,7 +32,7 @@ fun NetworkIndicator(
     viewModel: GeminiViewModel,
     modifier: Modifier = Modifier
 ) {
-    val connectionMode by viewModel.connectionMode.collectAsState()
+    val connectionMode by viewModel.connectionMode.collectAsStateWithLifecycle()
 
     val icon: ImageVector
     val label: String
@@ -76,3 +76,4 @@ fun NetworkIndicator(
         )
     }
 }
+

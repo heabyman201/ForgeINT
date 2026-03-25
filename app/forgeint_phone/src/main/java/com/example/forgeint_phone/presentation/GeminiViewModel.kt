@@ -1,6 +1,7 @@
 package com.example.forgeint.presentation
 
 import android.app.Application
+import android.os.SystemClock
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.forgeint.data.SettingsManager
@@ -9,8 +10,9 @@ import com.google.gson.annotations.SerializedName
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.FlowPreview
-import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -25,18 +27,23 @@ import retrofit2.http.Url
 import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
-import java.net.InetSocketAddress
-import java.net.Socket
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
+import kotlin.math.sqrt
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.RequestBody
 import okhttp3.ResponseBody
 import okhttp3.ResponseBody.Companion.asResponseBody
+import okio.BufferedSink
+import okio.GzipSink
 import okio.GzipSource
 import okio.buffer
 import java.util.concurrent.TimeUnit
 import com.example.forgeint.data.ChatDatabase
 import com.example.forgeint.data.Conversation
 import com.example.forgeint.data.Message
+import com.example.forgeint.data.MessageEmbedding
 import com.example.forgeint.data.UserTrait
 import com.example.forgeint.domain.LocalInferenceEngine
 import com.example.forgeint.domain.Personas
@@ -50,24 +57,126 @@ enum class LocalModelStatus {
 }
 
 class GeminiViewModel(application: Application) : AndroidViewModel(application) {
-    // Removed System.loadLibrary("forgeint_local")
+    companion object {
+        private const val TAG = "GeminiViewModel"
+        private const val STREAM_UI_FRAME_MS = 50L
+        @Volatile private var nativeParserAvailable = false
+        @Volatile private var nativeNumericOpsAvailable = false
+    }
 
-    fun parseStreamChunkNative(rawData: String): String? {
+    init {
+        val nativeLoaded = try {
+            System.loadLibrary("forgeint_local")
+            true
+        } catch (e: UnsatisfiedLinkError) {
+            android.util.Log.e(TAG, "Failed to load forgeint_local; using Kotlin fallbacks", e)
+            false
+        } catch (e: Throwable) {
+            android.util.Log.e(TAG, "Unexpected native load failure; using Kotlin fallbacks", e)
+            false
+        }
+        nativeParserAvailable = nativeLoaded
+        nativeNumericOpsAvailable = nativeLoaded
+    }
+
+    external fun parseStreamChunkNative(rawData: String): String?
+    external fun normalizeVectorNative(raw: FloatArray): FloatArray
+    external fun cosineSimilarityNative(a: FloatArray, b: FloatArray): Double
+    external fun fallbackHashEmbeddingNative(text: String, dim: Int): FloatArray
+    external fun scoreMessageVectorsNative(queryVector: FloatArray, vectorBlobs: Array<ByteArray>): DoubleArray
+
+    private fun parseStreamChunkSafe(rawData: String): String? {
+        if (nativeParserAvailable) {
+            try {
+                return parseStreamChunkNative(rawData)
+            } catch (e: UnsatisfiedLinkError) {
+                nativeParserAvailable = false
+                android.util.Log.e(TAG, "Native parser unavailable; using Kotlin fallback", e)
+            } catch (e: Throwable) {
+                nativeParserAvailable = false
+                android.util.Log.e(TAG, "Native parser failed; using Kotlin fallback", e)
+            }
+        }
+
         if (!rawData.startsWith("data: ") || rawData.contains("[DONE]")) return null
-        
         val jsonPart = rawData.removePrefix("data: ").trim()
         if (jsonPart.isBlank()) return null
-        
+
         return try {
             val json = JSONObject(jsonPart)
             val choices = json.optJSONArray("choices")
             val choice = choices?.optJSONObject(0)
             val delta = choice?.optJSONObject("delta")
             val content = delta?.optString("content") ?: choice?.optJSONObject("message")?.optString("content")
-            
             content?.replace(Regex("nn\\d+"), "")
-        } catch (e: Exception) {
+        } catch (_: Exception) {
             null
+        }
+    }
+
+    private fun normalizeVectorSafe(raw: FloatArray): FloatArray {
+        if (raw.isEmpty()) return raw
+        if (nativeNumericOpsAvailable) {
+            try {
+                return normalizeVectorNative(raw)
+            } catch (e: UnsatisfiedLinkError) {
+                nativeNumericOpsAvailable = false
+                android.util.Log.e(TAG, "normalizeVectorNative unavailable; using Kotlin fallback", e)
+            } catch (e: Throwable) {
+                nativeNumericOpsAvailable = false
+                android.util.Log.e(TAG, "normalizeVectorNative failed; using Kotlin fallback", e)
+            }
+        }
+        return normalizeVectorJvm(raw)
+    }
+
+    private fun cosineSimilaritySafe(a: FloatArray, b: FloatArray): Double {
+        if (a.isEmpty() || b.isEmpty()) return 0.0
+        if (nativeNumericOpsAvailable) {
+            try {
+                return cosineSimilarityNative(a, b)
+            } catch (e: UnsatisfiedLinkError) {
+                nativeNumericOpsAvailable = false
+                android.util.Log.e(TAG, "cosineSimilarityNative unavailable; using Kotlin fallback", e)
+            } catch (e: Throwable) {
+                nativeNumericOpsAvailable = false
+                android.util.Log.e(TAG, "cosineSimilarityNative failed; using Kotlin fallback", e)
+            }
+        }
+        return cosineSimilarityJvm(a, b)
+    }
+
+    private fun fallbackHashEmbeddingSafe(text: String, dim: Int): FloatArray {
+        if (dim <= 0) return FloatArray(0)
+        if (nativeNumericOpsAvailable) {
+            try {
+                return fallbackHashEmbeddingNative(text, dim)
+            } catch (e: UnsatisfiedLinkError) {
+                nativeNumericOpsAvailable = false
+                android.util.Log.e(TAG, "fallbackHashEmbeddingNative unavailable; using Kotlin fallback", e)
+            } catch (e: Throwable) {
+                nativeNumericOpsAvailable = false
+                android.util.Log.e(TAG, "fallbackHashEmbeddingNative failed; using Kotlin fallback", e)
+            }
+        }
+        return fallbackHashEmbeddingJvm(text, dim)
+    }
+
+    private fun scoreMessageVectorsSafe(queryVector: FloatArray, vectorBlobs: Array<ByteArray>): DoubleArray {
+        if (queryVector.isEmpty() || vectorBlobs.isEmpty()) return DoubleArray(0)
+        if (nativeNumericOpsAvailable) {
+            try {
+                return scoreMessageVectorsNative(queryVector, vectorBlobs)
+            } catch (e: UnsatisfiedLinkError) {
+                nativeNumericOpsAvailable = false
+                android.util.Log.e(TAG, "scoreMessageVectorsNative unavailable; using Kotlin fallback", e)
+            } catch (e: Throwable) {
+                nativeNumericOpsAvailable = false
+                android.util.Log.e(TAG, "scoreMessageVectorsNative failed; using Kotlin fallback", e)
+            }
+        }
+        return DoubleArray(vectorBlobs.size) { idx ->
+            cosineSimilaritySafe(queryVector, decodeVectorJvm(vectorBlobs[idx]))
         }
     }
 
@@ -81,6 +190,11 @@ class GeminiViewModel(application: Application) : AndroidViewModel(application) 
 
     private val openRouterKey = "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"
     private val huggingFaceToken = "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"
+    private val embeddingModelId = "text-embedding-qwen3-embedding-0.6b"
+    private val fallbackEmbeddingDim = 256
+    private var pendingAttachmentsForNextSend: List<ChatAttachment> = emptyList()
+    private var activeResponseJob: Job? = null
+    private var stopRequested = false
 
     private val _streamingMessage = MutableStateFlow<String?>(null)
     val streamingMessage = _streamingMessage.asStateFlow()
@@ -92,10 +206,22 @@ class GeminiViewModel(application: Application) : AndroidViewModel(application) 
     val availableModels = _availableModels.asStateFlow()
 
     private val _customPersonas = MutableStateFlow(customPersonaRepository.getCustomPersonas())
+
+    private fun gzipRequestBody(body: RequestBody): RequestBody = object : RequestBody() {
+        override fun contentType() = body.contentType()
+
+        override fun contentLength(): Long = -1
+
+        override fun writeTo(sink: BufferedSink) {
+            val gzipSink = GzipSink(sink).buffer()
+            body.writeTo(gzipSink)
+            gzipSink.close()
+        }
+    }
     
     val allPersonas = _customPersonas.map { custom ->
         Personas.list + custom
-    }.stateIn(viewModelScope, SharingStarted.Lazily, Personas.list)
+    }.stateIn(viewModelScope, SharingStarted.Eagerly, Personas.list)
 
     fun createPersona(name: String, description: String, prompt: String) {
         val newPersona = com.example.forgeint.domain.Persona(
@@ -122,7 +248,7 @@ class GeminiViewModel(application: Application) : AndroidViewModel(application) 
             val host = currentHostIp.value
             val port = currentPort.value
             val cleanHost = host.removePrefix("https://").removePrefix("http://").trim('/')
-            val isTunnel = cleanHost.contains("cloudflare") || cleanHost.contains("ngrok") || cleanHost.contains("loclx")
+            val isTunnel = isTunnelHost(cleanHost) || isFunnelEnabled.value
 
             val urlString = if (isTunnel) {
                 "https://$cleanHost/v1/models"
@@ -131,8 +257,9 @@ class GeminiViewModel(application: Application) : AndroidViewModel(application) 
             }
 
             try {
-                val request = Request.Builder().url(urlString).build()
-                val response = okHttpClient.newCall(request).execute()
+                val requestBuilder = Request.Builder().url(urlString)
+                buildLocalHeaders(cleanHost, isTunnel).forEach { (k, v) -> requestBuilder.addHeader(k, v) }
+                val response = okHttpClient.newCall(requestBuilder.build()).execute()
                 val bodyStr = response.body?.string()
 
                 if (response.isSuccessful && bodyStr != null) {
@@ -163,9 +290,17 @@ class GeminiViewModel(application: Application) : AndroidViewModel(application) 
         .writeTimeout(60, TimeUnit.SECONDS)
         .addInterceptor { chain ->
             val originalRequest = chain.request()
-            val request = originalRequest.newBuilder()
+            val originalBody = originalRequest.body
+            val requestBuilder = originalRequest.newBuilder()
                 .header("Accept-Encoding", "gzip")
-                .build()
+
+            if (originalBody != null && originalRequest.header("Content-Encoding") == null) {
+                requestBuilder
+                    .header("Content-Encoding", "gzip")
+                    .method(originalRequest.method, gzipRequestBody(originalBody))
+            }
+
+            val request = requestBuilder.build()
 
             val response = chain.proceed(request)
             val body = response.body
@@ -214,11 +349,29 @@ val memory_monitor = settingsManager.isMemoryMonitorEnabled
     val isLocalEnabled = settingsManager.isLocalEnabled
         .stateIn(viewModelScope, SharingStarted.Eagerly, false)
 
+    val isFunnelEnabled = settingsManager.isFunnelEnabled
+        .stateIn(viewModelScope, SharingStarted.Eagerly, false)
+
+    val localAuthToken = settingsManager.localAuthToken
+        .stateIn(viewModelScope, SharingStarted.Eagerly, SettingsManager.DEFAULT_LOCAL_AUTH_TOKEN)
+
     val selectedPersonaId: StateFlow<String> = settingsManager.selectedPersonaId
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(4500), "default")
+        .stateIn(viewModelScope, SharingStarted.Eagerly, "default")
+
+    val appTheme = settingsManager.appTheme
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), "Default")
 
     val isLiteMode = settingsManager.isLiteMode
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(4500), true)
+
+    val isVoiceDominantMode = settingsManager.isVoiceDominantMode
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(4500), false)
+
+    val apiKey = settingsManager.apiKey
+        .stateIn(viewModelScope, SharingStarted.Eagerly, "")
+
+    val isCustomApiKeyEnabled = settingsManager.isCustomApiKeyEnabled
+        .stateIn(viewModelScope, SharingStarted.Eagerly, false)
 
     val messageLength = settingsManager.messageLength
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(4500), "Normal")
@@ -231,19 +384,23 @@ val memory_monitor = settingsManager.isMemoryMonitorEnabled
 
     private var _isLoading = MutableStateFlow(false)
     val isLoading = _isLoading.asStateFlow()
+    private val _loadingBurst = MutableStateFlow(false)
+    val loadingBurst = _loadingBurst.asStateFlow()
+    private var loadingBurstJob: Job? = null
 
     private val _isTesting = MutableStateFlow(false)
     val isTesting = _isTesting.asStateFlow()
 
     private val _testResult = MutableStateFlow<String?>(null)
     val testResult = _testResult.asStateFlow()
+    private val _pendingAction = MutableStateFlow<String?>(null)
+    val pendingAction = _pendingAction.asStateFlow()
 
     private val _messageLimit = MutableStateFlow(20)
 
     private val _isHistoryLoading = MutableStateFlow(false)
     val isHistoryLoading = _isHistoryLoading.asStateFlow()
 
-    private val priorityPorts = listOf(1234, 5000, 8080, 8000, 3000, 11434)
     private val _localModelStatus = MutableStateFlow<LocalModelStatus>(LocalModelStatus.NotPresent)
     val localModelStatus = _localModelStatus.asStateFlow()
 
@@ -258,6 +415,14 @@ fun toggleMemoryMonitor() {
         settingsManager.setMemoryMonitorEnabled(!memory_monitor.value)
     }
 }
+
+    fun setPendingAction(action: String) {
+        _pendingAction.value = action
+    }
+
+    fun clearPendingAction() {
+        _pendingAction.value = null
+    }
     fun toggleThermalMonitor() {
         viewModelScope.launch {
             settingsManager.setSystemTelemetryEnabled(!thermal_monitor.value)
@@ -286,6 +451,8 @@ fun toggleMemoryMonitor() {
     init {
         checkLocalModelStatus()
         checkForEmulator()
+        startMemoryMaintenanceLoop()
+        observeLocalConnectivityConfig()
     }
 
     private fun checkForEmulator() {
@@ -320,9 +487,56 @@ fun toggleMemoryMonitor() {
 
     override fun onCleared() {
         super.onCleared()
+        loadingBurstJob?.cancel()
+        activeResponseJob?.cancel()
         if (isModelLoaded) {
             localEngine.unloadModel()
             isModelLoaded = false
+        }
+    }
+
+    private data class LocalConnectivityConfig(
+        val localEnabled: Boolean,
+        val host: String,
+        val port: String,
+        val funnelEnabled: Boolean,
+        val token: String
+    )
+
+    private fun observeLocalConnectivityConfig() {
+        viewModelScope.launch {
+            combine(
+                isLocalEnabled,
+                currentHostIp,
+                currentPort,
+                isFunnelEnabled,
+                localAuthToken
+            ) { localEnabled, host, port, funnel, token ->
+                LocalConnectivityConfig(localEnabled, host, port, funnel, token)
+            }
+                .debounce(850)
+                .collect { cfg ->
+                    if (cfg.localEnabled) autoConnectLocalServer(silent = true)
+                }
+        }
+    }
+
+    private fun setLoadingState(isLoading: Boolean) {
+        _isLoading.value = isLoading
+        if (!isLoading) {
+            loadingBurstJob?.cancel()
+            loadingBurstJob = null
+            _loadingBurst.value = false
+            return
+        }
+
+        loadingBurstJob?.cancel()
+        loadingBurstJob = viewModelScope.launch {
+            delay(180)
+            if (!_isLoading.value) return@launch
+            _loadingBurst.value = true
+            delay(450)
+            _loadingBurst.value = false
         }
     }
 
@@ -443,26 +657,29 @@ fun toggleMemoryMonitor() {
 
     fun setModel(modelId: String) = viewModelScope.launch { settingsManager.setModel(modelId) }
     fun setPersona(personaId: String) = viewModelScope.launch { settingsManager.setSelectedPersona(personaId) }
+    fun setTheme(theme: String) = viewModelScope.launch { settingsManager.setAppTheme(theme) }
     fun prepareForNewChat() {
         _currentConversationId.value = null
     }
 
     fun setLiteMode(enabled: Boolean) = viewModelScope.launch { settingsManager.setLiteMode(enabled) }
+    fun setVoiceDominantMode(enabled: Boolean) = viewModelScope.launch { settingsManager.setVoiceDominantMode(enabled) }
     fun toggleLocalMode(enabled: Boolean) = viewModelScope.launch { settingsManager.setLocalEnabled(enabled) }
     fun setMessageLength(length: String) = viewModelScope.launch { settingsManager.setMessageLength(length) }
+    fun updateApiKey(key: String) = viewModelScope.launch { settingsManager.setApiKey(key) }
+    fun toggleCustomApiKey(enabled: Boolean) = viewModelScope.launch { settingsManager.setCustomApiKeyEnabled(enabled) }
+    fun setFunnelEnabled(enabled: Boolean) = viewModelScope.launch { settingsManager.setFunnelEnabled(enabled) }
+    fun updateLocalAuthToken(token: String) = viewModelScope.launch { settingsManager.setLocalAuthToken(token) }
 
     fun updateHostIp(newIp: String) = viewModelScope.launch {
-        val cleanIp = newIp
-            .replace("https://", "")
-            .replace("http://", "")
-            .replace("/", "")
+        val cleanHost = newIp
             .trim()
+            .removePrefix("https://")
+            .removePrefix("http://")
+            .trim('/')
 
-        val newUrl = "http://$cleanIp"
-
-        settingsManager.setHostIp(newUrl)
-
-        _testResult.value = null
+        if (cleanHost.isBlank()) return@launch
+        settingsManager.setHostIp(cleanHost)
         _testResult.value = null
     }
 
@@ -485,35 +702,64 @@ fun toggleMemoryMonitor() {
         }
     }
 
-    fun startNewChat(prompt: String) {
+    fun addManualMemory(content: String, type: String) {
+        val trimmed = content.trim()
+        if (trimmed.length < 3) return
+        val category = if (type.equals("long_term", ignoreCase = true)) "LONG_TERM" else "SHORT_TERM"
+        val prefix = if (category == "LONG_TERM") "MANUAL_LT" else "MANUAL_ST"
+        val normalizedKey = "${prefix}_${trimmed.uppercase().replace(Regex("[^A-Z0-9]+"), "_").trim('_').take(32)}"
+        viewModelScope.launch(Dispatchers.IO) {
+            traitDao.traitDao().updateTrait(UserTrait(normalizedKey, trimmed.take(180), category))
+        }
+    }
+
+    fun startNewChat(prompt: String, attachments: List<ChatAttachment> = emptyList()) {
         if (_isLoading.value) return
 
-        viewModelScope.launch {
+        activeResponseJob = viewModelScope.launch {
+            stopRequested = false
             _messageLimit.value = 20
-            val newId = dao.insertConversation(Conversation(summary = prompt))
+            pendingAttachmentsForNextSend = attachments
+            val normalizedPrompt = normalizePromptForSend(prompt, attachments)
+            val storedPrompt = buildStoredPrompt(normalizedPrompt, attachments)
+            val newId = dao.insertConversation(Conversation(summary = normalizedPrompt))
             _currentConversationId.value = newId
-            dao.insertMessage(Message(conversationId = newId, text = prompt, isUser = true))
+            val userMessageId = dao.insertMessage(Message(conversationId = newId, text = storedPrompt, isUser = true))
+            queueEmbeddingForMessage(userMessageId, storedPrompt)
             generateResponse(newId)
 
             if (!isLocalEnabled.value || !localModelFile.exists()) {
-                launch(Dispatchers.IO) { extractAndStoreTraits(prompt) }
+                launch(Dispatchers.IO) { extractAndStoreTraits(normalizedPrompt) }
             }
         }
     }
 
-    fun continueChat(prompt: String) {
+    fun continueChat(prompt: String, attachments: List<ChatAttachment> = emptyList()) {
         if (_isLoading.value) return
 
         val chatId = _currentConversationId.value ?: return
-        viewModelScope.launch {
-            dao.insertMessage(Message(conversationId = chatId, text = prompt, isUser = true))
+        activeResponseJob = viewModelScope.launch {
+            stopRequested = false
+            pendingAttachmentsForNextSend = attachments
+            val normalizedPrompt = normalizePromptForSend(prompt, attachments)
+            val storedPrompt = buildStoredPrompt(normalizedPrompt, attachments)
+            val userMessageId = dao.insertMessage(Message(conversationId = chatId, text = storedPrompt, isUser = true))
+            queueEmbeddingForMessage(userMessageId, storedPrompt)
 
             if (!isLocalEnabled.value || !localModelFile.exists()) {
-                launch(Dispatchers.IO) { extractAndStoreTraits(prompt) }
+                launch(Dispatchers.IO) { extractAndStoreTraits(normalizedPrompt) }
             }
 
             generateResponse(chatId)
         }
+    }
+
+    fun stopResponse() {
+        stopRequested = true
+        activeResponseJob?.cancel(CancellationException("Stopped by user"))
+        _isThinking.value = false
+        _streamingMessage.value = null
+        setLoadingState(false)
     }
 
     fun openChat(id: Long) {
@@ -531,6 +777,7 @@ fun toggleMemoryMonitor() {
     }
 
     private suspend fun extractAndStoreTraits(userText: String) {
+        if (!memory_monitor.value) return
         if (userText.length < 10) return
 
         val explicitMemory = extractExplicitStructuredMemoryInstruction(userText)
@@ -556,11 +803,11 @@ fun toggleMemoryMonitor() {
         try {
             val request = ChatRequest(model = modelToUse, messages = apiMessages, stream = false, max_tokens = 256)
 
-            val responseText: String? = if (isLocalEnabled.value && !localModelFile.exists()) {
+            val responseText: String? = (if (isLocalEnabled.value && !localModelFile.exists()) {
                 val host = currentHostIp.value
                 val port = currentPort.value
                 val cleanHost = host.removePrefix("https://").removePrefix("http://").trim('/')
-                val isTunnel = cleanHost.contains("cloudflare") || cleanHost.contains("ngrok")
+                val isTunnel = isTunnelHost(cleanHost) || isFunnelEnabled.value
 
                 val urlString = if (isTunnel) {
                     "https://$cleanHost/v1/chat/completions"
@@ -568,17 +815,13 @@ fun toggleMemoryMonitor() {
                     "http://$cleanHost:$port/v1/chat/completions"
                 }
 
-                val headers = HashMap<String, String>()
-                if (isTunnel) {
-                    headers["ngrok-skip-browser-warning"] = "true"
-                    headers["User-Agent"] = "ForgeIntApp"
-                }
+                val headers = buildLocalHeaders(cleanHost, isTunnel)
 
                 val response = apiService.chatLocalBlocking(urlString, headers, request)
                 response.choices.firstOrNull()?.message?.content
             } else if (!isLocalEnabled.value) {
                 val response = apiService.chatOpenRouterBlocking(
-                    "Bearer $openRouterKey",
+                    "Bearer ${resolveOpenRouterKey()}",
                     "https://forgeint.app",
                     "ForgeInt",
                     request
@@ -586,7 +829,7 @@ fun toggleMemoryMonitor() {
                 response.choices.firstOrNull()?.message?.content
             } else {
                 null
-            }
+            }) as String?
 
             responseText?.let { text ->
                 if (text.contains("|") && !text.contains("NULL")) {
@@ -672,6 +915,41 @@ fun toggleMemoryMonitor() {
         return Triple(key, rawContent, category)
     }
 
+    private var lastMemoryMaintenanceAt: Long = 0L
+    private val shortTermExpiryMs = 12 * 60 * 60 * 1000L
+    private val memoryMaintenanceIntervalMs = 30 * 60 * 1000L
+
+    private fun startMemoryMaintenanceLoop() {
+        viewModelScope.launch(Dispatchers.IO) {
+            while (true) {
+                runMemoryMaintenanceIfNeeded(force = false)
+                delay(15 * 60 * 1000L)
+            }
+        }
+    }
+
+    private suspend fun runMemoryMaintenanceIfNeeded(force: Boolean) {
+        if (!memory_monitor.value) return
+        val now = System.currentTimeMillis()
+        if (!force && now - lastMemoryMaintenanceAt < memoryMaintenanceIntervalMs) return
+        lastMemoryMaintenanceAt = now
+
+        val all = traitDao.traitDao().getAllTraits()
+        val shortTerm = all.filter { it.category.equals("SHORT_TERM", ignoreCase = true) }
+        if (shortTerm.size <= 15) return
+
+        val staleCutoff = now - shortTermExpiryMs
+        val stale = shortTerm.filter { it.traitKey.startsWith("USER_CONTEXT") || it.traitKey.startsWith("MANUAL_ST") }
+        val toDelete = stale.sortedBy { it.traitKey.hashCode() }.take((shortTerm.size - 15).coerceAtLeast(0))
+        toDelete.forEach { traitDao.traitDao().deleteTrait(it.traitKey) }
+
+        if (toDelete.isEmpty() && staleCutoff > 0) {
+            shortTerm.take((shortTerm.size - 15).coerceAtLeast(0)).forEach {
+                traitDao.traitDao().deleteTrait(it.traitKey)
+            }
+        }
+    }
+
     fun toggleBookmark(id: Long, currentStatus: Boolean) {
         viewModelScope.launch {
             dao.toggleBookmark(id, !currentStatus)
@@ -685,20 +963,9 @@ fun toggleMemoryMonitor() {
             val host = currentHostIp.value
             val cleanHost = host.removePrefix("https://").removePrefix("http://").trim('/')
 
-            val isTunnel = cleanHost.contains("cloudflare") || cleanHost.contains("ngrok") || cleanHost.contains("loclx")
-            val finalPort = if (isTunnel) {
-                _testResult.value = "Tunnel detected. Skipping port scan..."
-                ""
-            } else {
-                _testResult.value = "Scanning local network..."
-                val scanned = scanAllPorts(cleanHost)
-                if (scanned != null) {
-                    settingsManager.setServerPort(scanned)
-                    scanned
-                } else {
-                    currentPort.value
-                }
-            }
+            val isTunnel = isTunnelHost(cleanHost) || isFunnelEnabled.value
+            val finalPort = currentPort.value
+            _testResult.value = if (isTunnel) "Testing funnel/tunnel endpoint..." else "Testing local endpoint..."
 
             val urlString = if (isTunnel) {
                 "https://$cleanHost/v1/models"
@@ -710,10 +977,7 @@ fun toggleMemoryMonitor() {
                 val result = withContext(Dispatchers.IO) {
                     try {
                         val requestBuilder = Request.Builder().url(urlString)
-                        if (isTunnel) {
-                            requestBuilder.addHeader("ngrok-skip-browser-warning", "true")
-                            requestBuilder.addHeader("User-Agent", "ForgeIntApp")
-                        }
+                        buildLocalHeaders(cleanHost, isTunnel).forEach { (k, v) -> requestBuilder.addHeader(k, v) }
                         val response = okHttpClient.newCall(requestBuilder.build()).execute()
                         val code = response.code
                         response.close()
@@ -736,38 +1000,49 @@ fun toggleMemoryMonitor() {
         }
     }
 
-    private suspend fun scanAllPorts(host: String): String? = withContext(Dispatchers.IO) {
-        for (port in priorityPorts) {
-            if (isPortOpen(host, port)) return@withContext port.toString()
+    private suspend fun autoConnectLocalServer(silent: Boolean) {
+        val host = currentHostIp.value
+        val cleanHost = host.removePrefix("https://").removePrefix("http://").trim('/')
+        if (cleanHost.isBlank()) return
+
+        val port = currentPort.value
+        val isTunnel = isTunnelHost(cleanHost) || isFunnelEnabled.value
+        val urlString = if (isTunnel) {
+            "https://$cleanHost/v1/models"
+        } else {
+            "http://$cleanHost:$port/v1/models"
         }
 
-        val maxPort = 65535
-        val chunkSize = 500
+        withContext(Dispatchers.IO) {
+            try {
+                val requestBuilder = Request.Builder().url(urlString)
+                buildLocalHeaders(cleanHost, isTunnel).forEach { (k, v) -> requestBuilder.addHeader(k, v) }
+                val response = okHttpClient.newCall(requestBuilder.build()).execute()
+                val bodyStr = response.body?.string()
 
-        for (start in 1..maxPort step chunkSize) {
-            val end = (start + chunkSize - 1).coerceAtMost(maxPort)
-            _testResult.value = "Scanning ports $start - $end..."
-
-            val deferredResults = (start..end).map { port ->
-                async { if (isPortOpen(host, port)) port else null }
+                if (response.isSuccessful && !bodyStr.isNullOrBlank()) {
+                    val json = JSONObject(bodyStr)
+                    val data = json.optJSONArray("data")
+                    val models = mutableListOf<String>()
+                    if (data != null) {
+                        for (i in 0 until data.length()) {
+                            val id = data.optJSONObject(i)?.optString("id").orEmpty()
+                            if (id.isNotBlank()) models.add(id)
+                        }
+                    }
+                    if (models.isNotEmpty()) {
+                        _availableModels.value = models
+                        if (!silent) _testResult.value = "Success! Connected to $cleanHost"
+                    } else if (!silent) {
+                        _testResult.value = "Connected, but no models exposed."
+                    }
+                } else if (!silent) {
+                    _testResult.value = "Connected, but Server Error ${response.code}"
+                }
+                response.close()
+            } catch (e: Exception) {
+                if (!silent) _testResult.value = "Failed to connect: ${e.message}"
             }
-
-            val found = deferredResults.awaitAll().filterNotNull().firstOrNull()
-            if (found != null) return@withContext found.toString()
-        }
-
-        _testResult.value = "No local ports found."
-        return@withContext null
-    }
-
-    private fun isPortOpen(host: String, port: Int): Boolean {
-        return try {
-            val socket = Socket()
-            socket.connect(InetSocketAddress(host, port), 150)
-            socket.close()
-            true
-        } catch (e: Exception) {
-            false
         }
     }
 
@@ -785,9 +1060,265 @@ fun toggleMemoryMonitor() {
         return sb.toString()
     }
 
+    private fun buildStoredPrompt(prompt: String, attachments: List<ChatAttachment>): String {
+        if (attachments.isEmpty()) return prompt
+        val attachmentSummary = buildString {
+            attachments.forEach { attachment ->
+                appendLine()
+                append("[Attachment: ${attachment.label} | ${attachment.mimeType}]")
+                attachment.textContent
+                    ?.takeIf { it.isNotBlank() }
+                    ?.let {
+                        appendLine()
+                        append(it.take(6000))
+                    }
+            }
+        }
+        return (prompt + attachmentSummary).trim()
+    }
+
+    private fun normalizePromptForSend(prompt: String, attachments: List<ChatAttachment>): String {
+        val trimmed = prompt.trim()
+        return if (trimmed.isNotBlank()) {
+            trimmed
+        } else if (attachments.isNotEmpty()) {
+            "Please analyze the attached content."
+        } else {
+            trimmed
+        }
+    }
+
+    private fun buildLatestUserApiContent(prompt: String, attachments: List<ChatAttachment>): Any {
+        val imageParts = attachments
+            .mapNotNull { attachment ->
+                attachment.imageDataUrl?.let { dataUrl ->
+                    ContentImagePart(image_url = ImageUrlPayload(dataUrl))
+                }
+            }
+
+        if (imageParts.isEmpty()) return prompt
+
+        return buildList<Any> {
+            add(ContentTextPart(text = prompt))
+            addAll(imageParts)
+        }
+    }
+
+    private suspend fun buildRelevantConversationContext(currentChatId: Long, latestUserPrompt: String): String {
+        if (latestUserPrompt.isBlank()) return ""
+
+        val recentConversations = dao.getRecentConversationsForMemory(
+            excludeConversationId = currentChatId,
+            limit = 40
+        )
+        if (recentConversations.isEmpty()) return ""
+
+        val messagesByConversation = recentConversations.associate { conversation ->
+            conversation.id to dao.getRecentMessagesForConversation(conversation.id, limit = 12)
+        }
+        val vectorScores = buildConversationVectorScores(latestUserPrompt, messagesByConversation)
+
+        val ranked = MemoryRetrievalEngine.rankConversations(
+            query = latestUserPrompt,
+            conversations = recentConversations,
+            messagesByConversation = messagesByConversation,
+            vectorScoresByConversation = vectorScores,
+            maxResults = 7
+        )
+        return MemoryRetrievalEngine.buildPromptContext(ranked)
+    }
+
+    private suspend fun buildConversationVectorScores(
+        query: String,
+        messagesByConversation: Map<Long, List<Message>>
+    ): Map<Long, Double> {
+        val conversationIds = messagesByConversation.keys.toList()
+        val queryVector = generateEmbeddingVector(query) ?: return conversationIds.associateWith { 0.0 }
+        val allMessages = messagesByConversation.values.flatten().filter { it.id > 0L }
+        if (allMessages.isEmpty()) return conversationIds.associateWith { 0.0 }
+
+        val messageIds = allMessages.map { it.id }
+        val existingEmbeddings = dao.getEmbeddingsForMessages(messageIds)
+        val embeddingByMessageId = existingEmbeddings.associateBy { it.messageId }.toMutableMap()
+
+        val missingMessages = allMessages
+            .filter { it.id !in embeddingByMessageId }
+            .takeLast(12)
+
+        missingMessages.forEach { msg ->
+            val vec = generateEmbeddingVector(msg.text) ?: return@forEach
+            val saved = MessageEmbedding(
+                messageId = msg.id,
+                vector = encodeVector(vec),
+                model = embeddingModelId
+            )
+            dao.upsertMessageEmbedding(saved)
+            embeddingByMessageId[msg.id] = saved
+        }
+
+        val messageConversationIds = ArrayList<Long>()
+        val vectorBlobs = ArrayList<ByteArray>()
+        messagesByConversation.forEach { (conversationId, messages) ->
+            messages.forEach { msg ->
+                val stored = embeddingByMessageId[msg.id] ?: return@forEach
+                messageConversationIds.add(conversationId)
+                vectorBlobs.add(stored.vector)
+            }
+        }
+        if (vectorBlobs.isEmpty()) return conversationIds.associateWith { 0.0 }
+
+        val sims = scoreMessageVectorsSafe(queryVector, vectorBlobs.toTypedArray())
+        val top3ByConversation = HashMap<Long, DoubleArray>()
+        for (i in sims.indices) {
+            val conversationId = messageConversationIds.getOrNull(i) ?: continue
+            val top = top3ByConversation.getOrPut(conversationId) {
+                doubleArrayOf(Double.NEGATIVE_INFINITY, Double.NEGATIVE_INFINITY, Double.NEGATIVE_INFINITY)
+            }
+            val score = sims[i]
+            when {
+                score > top[0] -> {
+                    top[2] = top[1]
+                    top[1] = top[0]
+                    top[0] = score
+                }
+                score > top[1] -> {
+                    top[2] = top[1]
+                    top[1] = score
+                }
+                score > top[2] -> top[2] = score
+            }
+        }
+
+        return conversationIds.associateWith { conversationId ->
+            val top = top3ByConversation[conversationId] ?: return@associateWith 0.0
+            var sum = 0.0
+            var count = 0
+            for (score in top) {
+                if (score.isFinite()) {
+                    sum += score
+                    count++
+                }
+            }
+            if (count == 0) 0.0 else (sum / count).coerceIn(0.0, 1.0)
+        }
+    }
+
+    private fun encodeVector(vector: FloatArray): ByteArray {
+        if (vector.isEmpty()) return ByteArray(0)
+        val buffer = ByteBuffer.allocate(vector.size * 4).order(ByteOrder.LITTLE_ENDIAN)
+        vector.forEach { buffer.putFloat(it) }
+        return buffer.array()
+    }
+
+    private fun decodeVectorJvm(encoded: ByteArray): FloatArray {
+        if (encoded.isEmpty()) return FloatArray(0)
+        val count = encoded.size / 4
+        if (count == 0) return FloatArray(0)
+        val buffer = ByteBuffer.wrap(encoded, 0, count * 4).order(ByteOrder.LITTLE_ENDIAN)
+        val out = FloatArray(count)
+        for (i in 0 until count) out[i] = buffer.float
+        return out
+    }
+
+    private fun normalizeVectorJvm(raw: FloatArray): FloatArray {
+        if (raw.isEmpty()) return raw
+        val norm = sqrt(raw.sumOf { (it * it).toDouble() }).toFloat()
+        if (norm <= 1e-8f) return raw
+        return FloatArray(raw.size) { idx -> raw[idx] / norm }
+    }
+
+    private fun cosineSimilarityJvm(a: FloatArray, b: FloatArray): Double {
+        if (a.isEmpty() || b.isEmpty()) return 0.0
+        val size = minOf(a.size, b.size)
+        var dot = 0.0
+        var normA = 0.0
+        var normB = 0.0
+        for (i in 0 until size) {
+            val va = a[i].toDouble()
+            val vb = b[i].toDouble()
+            dot += va * vb
+            normA += va * va
+            normB += vb * vb
+        }
+        if (normA <= 1e-10 || normB <= 1e-10) return 0.0
+        return (dot / (sqrt(normA) * sqrt(normB))).coerceIn(0.0, 1.0)
+    }
+
+    private fun fallbackHashEmbeddingJvm(text: String, dim: Int = fallbackEmbeddingDim): FloatArray {
+        val vec = FloatArray(dim)
+        val tokens = Regex("[a-zA-Z0-9']+").findAll(text.lowercase()).map { it.value }.toList()
+        tokens.forEachIndexed { index, token ->
+            val hash = token.hashCode()
+            val idx = kotlin.math.abs(hash) % dim
+            val sign = if (((hash ushr 1) and 1) == 0) 1f else -1f
+            vec[idx] += sign * (1f + (index % 3) * 0.1f)
+        }
+        return normalizeVectorJvm(vec)
+    }
+
+    private suspend fun generateEmbeddingVector(text: String): FloatArray? {
+        val clean = text.trim()
+        if (clean.isBlank()) return null
+
+        val request = EmbeddingRequest(
+            model = embeddingModelId,
+            input = clean.take(2500)
+        )
+        val useRemoteLocalEndpoint = isLocalEnabled.value && !localModelFile.exists()
+
+        val remoteVector = try {
+            when {
+                useRemoteLocalEndpoint -> {
+                    val host = currentHostIp.value
+                    val port = currentPort.value
+                    val cleanHost = host.removePrefix("https://").removePrefix("http://").trim('/')
+                    val isTunnel = isTunnelHost(cleanHost) || isFunnelEnabled.value
+                    val urlString = if (isTunnel) {
+                        "https://$cleanHost/v1/embeddings"
+                    } else {
+                        "http://$cleanHost:$port/v1/embeddings"
+                    }
+                    apiService.embeddingsLocal(
+                        urlString,
+                        buildLocalHeaders(cleanHost, isTunnel),
+                        request
+                    ).data.firstOrNull()?.embedding?.map { it.toFloat() }?.toFloatArray()
+                }
+                !isLocalEnabled.value -> {
+                    apiService.embeddingsOpenRouter(
+                        "Bearer ${resolveOpenRouterKey()}",
+                        "https://forgeint.app",
+                        "ForgeInt",
+                        request
+                    ).data.firstOrNull()?.embedding?.map { it.toFloat() }?.toFloatArray()
+                }
+                else -> null
+            }
+        } catch (_: Exception) {
+            null
+        }
+
+        return normalizeVectorSafe(remoteVector ?: fallbackHashEmbeddingSafe(clean, fallbackEmbeddingDim))
+    }
+
+    private fun queueEmbeddingForMessage(messageId: Long, text: String) {
+        if (messageId <= 0L || text.isBlank()) return
+        viewModelScope.launch(Dispatchers.IO) {
+            val vec = generateEmbeddingVector(text) ?: return@launch
+            dao.upsertMessageEmbedding(
+                MessageEmbedding(
+                    messageId = messageId,
+                    vector = encodeVector(vec),
+                    model = embeddingModelId
+                )
+            )
+        }
+    }
+
     private suspend fun generateResponse(chatId: Long) {
-        _isLoading.value = true
+        setLoadingState(true)
         _streamingMessage.value = ""
+        val attachmentsForThisTurn = pendingAttachmentsForNextSend
 
         val currentId = selectedPersonaId.value
         val persona = allPersonas.value.find { it.id == currentId } ?: Personas.findById(currentId)
@@ -795,13 +1326,15 @@ fun toggleMemoryMonitor() {
         val modelToUse = currentModelId.value.trim()
         val useLocal = isLocalEnabled.value
         val conversationHistory = dao.getMessages(chatId, 10).first().reversed()
+        val latestUserPrompt = conversationHistory.lastOrNull { it.isUser }?.text.orEmpty()
+        val relevantConversationContext = buildRelevantConversationContext(chatId, latestUserPrompt)
 
-        val traits = traitDao.traitDao().getAllTraits()
-        val memoryContext = if (traits.isNotEmpty()) {
+        val traits = if (memory_monitor.value) traitDao.traitDao().getAllTraits() else emptyList()
+        val memoryContext = if (memory_monitor.value && traits.isNotEmpty()) {
             "\n[KNOWN USER TRAITS]:\n" + traits.joinToString("\n") { "- ${it.category}: ${it.traitValue}" }
         } else ""
 
-        val fullSystemPrompt = persona.systemInstruction + memoryContext
+        val fullSystemPrompt = persona.systemInstruction + memoryContext + relevantConversationContext
 
         val maxTokensValue = when (messageLength.value) {
             "Shorter" -> 256
@@ -838,34 +1371,69 @@ fun toggleMemoryMonitor() {
                 } else {
                     val apiMessages = mutableListOf<ApiMessage>()
                     apiMessages.add(ApiMessage("system", fullSystemPrompt))
+                    val latestMessageId = conversationHistory.lastOrNull()?.id
                     conversationHistory.forEach { message ->
-                        apiMessages.add(ApiMessage(if (message.isUser) "user" else "assistant", message.text.trim()))
+                        val content: Any = if (
+                            message.isUser &&
+                            message.id == latestMessageId &&
+                            attachmentsForThisTurn.isNotEmpty()
+                        ) {
+                            buildLatestUserApiContent(message.text.trim(), attachmentsForThisTurn)
+                        } else {
+                            message.text.trim()
+                        }
+                        apiMessages.add(ApiMessage(if (message.isUser) "user" else "assistant", content))
                     }
                     callLmStudioStream(apiMessages, modelToUse, maxTokensValue)
                 }
             } else {
                 val apiMessages = mutableListOf<ApiMessage>()
                 apiMessages.add(ApiMessage("system", fullSystemPrompt))
+                val latestMessageId = conversationHistory.lastOrNull()?.id
                 conversationHistory.forEach { message ->
-                    apiMessages.add(ApiMessage(if (message.isUser) "user" else "assistant", message.text.trim()))
+                    val content: Any = if (
+                        message.isUser &&
+                        message.id == latestMessageId &&
+                        attachmentsForThisTurn.isNotEmpty()
+                    ) {
+                        buildLatestUserApiContent(message.text.trim(), attachmentsForThisTurn)
+                    } else {
+                        message.text.trim()
+                    }
+                    apiMessages.add(ApiMessage(if (message.isUser) "user" else "assistant", content))
                 }
                 callOpenRouterStream(apiMessages, modelToUse, maxTokensValue)
             }
 
             if (!fullResponse.isNullOrBlank()) {
-                dao.insertMessage(Message(conversationId = chatId, text = fullResponse, isUser = false))
+                val assistantMessageId = dao.insertMessage(Message(conversationId = chatId, text = fullResponse, isUser = false))
+                queueEmbeddingForMessage(assistantMessageId, fullResponse)
             } else {
-                dao.insertMessage(Message(conversationId = chatId, text = "No response generated.", isUser = false))
+                val assistantMessageId = dao.insertMessage(Message(conversationId = chatId, text = "No response generated.", isUser = false))
+                queueEmbeddingForMessage(assistantMessageId, "No response generated.")
             }
+        } catch (e: CancellationException) {
+            if (stopRequested && useLocal && localModelFile.exists() && isModelLoaded) {
+                runCatching { localEngine.unloadModel() }
+                isModelLoaded = false
+            }
+            throw e
         } catch (e: Exception) {
-            dao.insertMessage(Message(conversationId = chatId, text = "Error: ${e.message}", isUser = false))
+            if (!stopRequested) {
+                val assistantMessageId = dao.insertMessage(Message(conversationId = chatId, text = "Error: ${e.message}", isUser = false))
+                queueEmbeddingForMessage(assistantMessageId, "Error: ${e.message}")
+            }
 
             if (useLocal && localModelFile.exists()) {
                 isModelLoaded = false
             }
         } finally {
+            pendingAttachmentsForNextSend = emptyList()
             _streamingMessage.value = null
-            _isLoading.value = false
+            _isThinking.value = false
+            setLoadingState(false)
+            stopRequested = false
+            activeResponseJob = null
         }
     }
 
@@ -873,7 +1441,7 @@ fun toggleMemoryMonitor() {
         val host = currentHostIp.value
         val port = currentPort.value
         val cleanHost = host.removePrefix("https://").removePrefix("http://").trim('/')
-        val isTunnel = cleanHost.contains("cloudflare") || cleanHost.contains("ngrok") || cleanHost.contains("loclx")
+        val isTunnel = isTunnelHost(cleanHost) || isFunnelEnabled.value
 
         val urlString = if (isTunnel) {
             "https://$cleanHost/v1/chat/completions"
@@ -881,12 +1449,7 @@ fun toggleMemoryMonitor() {
             "http://$cleanHost:$port/v1/chat/completions"
         }
 
-        val headers = HashMap<String, String>()
-        if (isTunnel) {
-            headers["ngrok-skip-browser-warning"] = "true"
-            headers["cf-terminate-connection"] = "true"
-            headers["User-Agent"] = "ForgeIntApp"
-        }
+        val headers = buildLocalHeaders(cleanHost, isTunnel)
 
         val request = ChatRequest(model = modelId, messages = messages, temperature = 0.7, stream = true, max_tokens = maxTokens)
 
@@ -896,8 +1459,9 @@ fun toggleMemoryMonitor() {
 
     private suspend fun callOpenRouterStream(messages: List<ApiMessage>, modelId: String, maxTokens: Int): String? {
         val request = ChatRequest(model = modelId, messages = messages, stream = true, max_tokens = maxTokens)
+        val authHeader = "Bearer ${resolveOpenRouterKey()}"
         val responseBody = apiService.chatOpenRouterStream(
-            "Bearer $openRouterKey",
+            authHeader,
             "https://forgeint.app",
             "ForgeInt",
             request
@@ -905,43 +1469,84 @@ fun toggleMemoryMonitor() {
         return processStream(responseBody)
     }
 
+    private fun resolveOpenRouterKey(): String {
+        return if (isCustomApiKeyEnabled.value && apiKey.value.isNotBlank()) {
+            apiKey.value.trim()
+        } else {
+            openRouterKey
+        }
+    }
+
+    private fun isTunnelHost(cleanHost: String): Boolean {
+        return cleanHost.contains("cloudflare") ||
+            cleanHost.contains("ngrok") ||
+            cleanHost.contains("loclx") ||
+            cleanHost.endsWith(".ts.net", ignoreCase = true)
+    }
+
+    private fun buildLocalHeaders(cleanHost: String, isTunnel: Boolean): HashMap<String, String> {
+        val headers = HashMap<String, String>()
+        if (isTunnel) {
+            headers["cf-terminate-connection"] = "true"
+            headers["User-Agent"] = "ForgeIntApp"
+            if (cleanHost.contains("ngrok", ignoreCase = true)) {
+                headers["ngrok-skip-browser-warning"] = "true"
+            }
+        }
+        val token = localAuthToken.value.trim()
+        if (token.isNotBlank()) {
+            headers["Authorization"] = "Bearer $token"
+        }
+        return headers
+    }
+
     private suspend fun processStream(responseBody: ResponseBody): String {
         val fullResponse = StringBuilder()
+        var lastUiUpdateAt = 0L
+        var lastRenderedText: String? = null
+        var lastThinkingState = false
+
+        fun buildRenderState(raw: String): Pair<Boolean, String> {
+            val thinkStart = raw.indexOf("<think>")
+            val thinkEnd = raw.indexOf("</think>")
+            return if (thinkStart != -1 && thinkEnd == -1) {
+                true to raw.substring(0, thinkStart)
+            } else if (thinkStart != -1 && thinkEnd != -1) {
+                false to (raw.substring(0, thinkStart) + raw.substring(thinkEnd + 8))
+            } else {
+                false to raw
+            }
+        }
 
         withContext(Dispatchers.IO) {
             responseBody.source().use { source ->
                 while (!source.exhausted()) {
                     val line = source.readUtf8Line() ?: break
 
-                    val content = parseStreamChunkNative(line)
+                    val content = parseStreamChunkSafe(line)
 
                     if (content != null) {
                         fullResponse.append(content)
-                        val currentString = fullResponse.toString()
+                        val (thinkingNow, visibleText) = buildRenderState(fullResponse.toString())
+                        val now = SystemClock.elapsedRealtime()
+                        val frameOpen = (now - lastUiUpdateAt) >= STREAM_UI_FRAME_MS
+                        val thinkingChanged = thinkingNow != lastThinkingState
+                        val textChanged = visibleText != lastRenderedText
 
-                        val thinkStart = currentString.indexOf("<think>")
-                        val thinkEnd = currentString.indexOf("</think>")
-
-                        if (thinkStart != -1 && thinkEnd == -1) {
-                            // Thinking in progress
-                            if (!_isThinking.value) _isThinking.value = true
-                            // Show text before the tag
-                            _streamingMessage.value = currentString.substring(0, thinkStart)
-                        } else if (thinkStart != -1 && thinkEnd != -1) {
-                            // Thinking finished
-                            if (_isThinking.value) _isThinking.value = false
-
-                            val preThink = currentString.substring(0, thinkStart)
-                            val postThink = currentString.substring(thinkEnd + 8) // </think> is 8 chars
-                            _streamingMessage.value = preThink + postThink
-                        } else {
-                            // No thinking tags
-                            _isThinking.value = false
-                            _streamingMessage.value = currentString
+                        if (thinkingChanged || (frameOpen && textChanged)) {
+                            _isThinking.value = thinkingNow
+                            _streamingMessage.value = visibleText
+                            lastThinkingState = thinkingNow
+                            lastRenderedText = visibleText
+                            lastUiUpdateAt = now
                         }
                     }
                 }
             }
+        }
+        val (_, finalVisibleText) = buildRenderState(fullResponse.toString())
+        if (finalVisibleText != lastRenderedText) {
+            _streamingMessage.value = finalVisibleText
         }
         _isThinking.value = false
         return fullResponse.toString()
@@ -979,7 +1584,23 @@ interface GeminiApiService {
         @HeaderMap headers: Map<String, String>,
         @Body request: ChatRequest
     ): ChatResponse
+
+    @POST("embeddings")
+    suspend fun embeddingsOpenRouter(
+        @Header("Authorization") auth: String,
+        @Header("HTTP-Referer") referer: String,
+        @Header("X-Title") title: String,
+        @Body request: EmbeddingRequest
+    ): EmbeddingResponse
+
+    @POST
+    suspend fun embeddingsLocal(
+        @Url url: String,
+        @HeaderMap headers: Map<String, String>,
+        @Body request: EmbeddingRequest
+    ): EmbeddingResponse
 }
+
 data class ChatRequest(
     @SerializedName("model") val model: String,
     @SerializedName("messages") val messages: List<ApiMessage>,
@@ -987,6 +1608,20 @@ data class ChatRequest(
     @SerializedName("stream") val stream: Boolean = false,
     @SerializedName("max_tokens") val max_tokens: Int? = null
 )
+
+data class EmbeddingRequest(
+    @SerializedName("model") val model: String,
+    @SerializedName("input") val input: String
+)
+
+data class EmbeddingResponse(
+    @SerializedName("data") val data: List<EmbeddingData>
+)
+
+data class EmbeddingData(
+    @SerializedName("embedding") val embedding: List<Double>
+)
+
 data class ChatResponse(
     @SerializedName("choices") val choices: List<Choice>
 )
@@ -996,7 +1631,7 @@ data class Choice(
 )
 data class ApiMessage(
     @SerializedName("role") val role: String,
-    @SerializedName("content") val content: String
+    @SerializedName("content") val content: Any
 )
 data class ChatStreamResponse(
     @SerializedName("choices") val choices: List<StreamChoice>
@@ -1009,4 +1644,3 @@ data class StreamChoice(
 data class Delta(
     @SerializedName("content") val content: String?
 )
-

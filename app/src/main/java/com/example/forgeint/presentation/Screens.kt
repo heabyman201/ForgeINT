@@ -4,6 +4,9 @@ package com.example.forgeint.presentation
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.border
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.ui.draw.rotate
@@ -30,7 +33,10 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlin.math.exp
 import android.app.RemoteInput
+import android.Manifest
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.os.Bundle
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.core.LinearEasing
@@ -68,9 +74,12 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Keyboard
 import androidx.compose.material.icons.filled.Person
+import androidx.compose.material.icons.filled.PrivateConnectivity
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.Web
+import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.Create
 import androidx.compose.runtime.Composable
@@ -99,6 +108,8 @@ import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.rotary.onRotaryScrollEvent
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
+import android.speech.RecognitionListener
+import android.speech.SpeechRecognizer
 import java.util.Locale
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.ui.platform.LocalContext
@@ -195,6 +206,7 @@ import android.speech.RecognizerIntent
 import androidx.activity.compose.rememberLauncherForActivityResult
 
 import androidx.compose.material.icons.filled.Mic
+import androidx.core.content.ContextCompat
 import com.example.forgeint.presentation.theme.LocalForgeIntColors
 val ColorBlack = Color.Black
 val ColorLiteAccent = Color(0xFFDCB17E)
@@ -238,8 +250,14 @@ fun ChatItemRow(
     onBookmarkClick: (Long, Boolean) -> Unit
 ) {
     var isDeleting by remember { mutableStateOf(false) }
+    var bookmarkPulseTick by remember { mutableIntStateOf(0) }
     val haptic = LocalHapticFeedback.current
     val colors = LocalForgeIntColors.current
+    val bookmarkGradientShift by animateFloatAsState(
+        targetValue = if (chat.isBookmarked) 1f else 0f,
+        animationSpec = tween(durationMillis = 700, easing = FastOutSlowInEasing),
+        label = "bookmark_row_gradient_shift"
+    )
 
     val animatedAlpha by animateFloatAsState(
         targetValue = if (isDeleting) 0f else 1f,
@@ -276,15 +294,35 @@ fun ChatItemRow(
     ) {
         TitleCard(
             backgroundPainter = CardDefaults.cardBackgroundPainter(
-                startBackgroundColor = if (isDeleting) Color(0xFFB41C1C) else colors.surface,
-                endBackgroundColor = if (isDeleting) Color(0xFFB71C1C) else colors.surface
+                startBackgroundColor = when {
+                    isDeleting -> Color(0xFFB41C1C)
+                    else -> {
+                        val leftReveal = FastOutSlowInEasing.transform(bookmarkGradientShift)
+                        androidx.compose.ui.graphics.lerp(
+                            colors.surface,
+                            colors.primary.copy(alpha = 0.40f),
+                            leftReveal
+                        )
+                    }
+                },
+                endBackgroundColor = when {
+                    isDeleting -> Color(0xFFB71C1C)
+                    else -> {
+                        val rightReveal = FastOutSlowInEasing.transform(bookmarkGradientShift) * 0.35f
+                        androidx.compose.ui.graphics.lerp(
+                            colors.surface,
+                            colors.replyIcon.copy(alpha = 0.22f),
+                            rightReveal
+                        )
+                    }
+                }
             ),
             contentColor = if (isDeleting) Color.White else colors.onPrimary,
             onClick = { },
             title = {
                 Text(
                     text = chat.summary,
-                    maxLines = 2,
+                    maxLines = 3,
                     color = colors.userText,
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.padding(end = 26.dp)
@@ -325,9 +363,23 @@ fun ChatItemRow(
                     .align(Alignment.TopEnd)
                     .padding(top = 12.dp, end = 12.dp)
             ) {
+                val bookmarkScale = remember { androidx.compose.animation.core.Animatable(1f) }
+                LaunchedEffect(bookmarkPulseTick) {
+                    if (bookmarkPulseTick > 0) {
+                        bookmarkScale.animateTo(1.2f, animationSpec = tween(140))
+                        bookmarkScale.animateTo(1f, animationSpec = tween(220))
+                    }
+                }
                 ToggleButton(
                     checked = chat.isBookmarked,
-                    onCheckedChange = { onBookmarkClick(chat.id, chat.isBookmarked) },
+                    onCheckedChange = {
+                        val becomingBookmarked = !chat.isBookmarked
+                        bookmarkPulseTick++
+                        haptic.performHapticFeedback(
+                            if (becomingBookmarked) HapticFeedbackType.LongPress else HapticFeedbackType.TextHandleMove
+                        )
+                        onBookmarkClick(chat.id, chat.isBookmarked)
+                    },
                     modifier = Modifier.size(24.dp),
                     colors = ToggleButtonDefaults.toggleButtonColors(
                         uncheckedBackgroundColor = Color.Transparent,
@@ -337,7 +389,11 @@ fun ChatItemRow(
                     Icon(
                         imageVector = if (chat.isBookmarked) Icons.Default.Bookmark else Icons.Default.BookmarkBorder,
                         contentDescription = "Bookmark",
-                        tint = if (chat.isBookmarked) Color(0xFFFDD835) else Color.Gray
+                        tint = if (chat.isBookmarked) Color(0xFFFDD835) else Color.Gray,
+                        modifier = Modifier.graphicsLayer {
+                            scaleX = bookmarkScale.value
+                            scaleY = bookmarkScale.value
+                        }
                     )
                 }
             }
@@ -355,7 +411,8 @@ fun DetailedHistoryScreen(
     onNavigateToMemory: () -> Unit,
     searchQuery: String,
     onSearchQueryChanged: (String) -> Unit,
-    viewModel: GeminiViewModel // Add ViewModel to access connection mode
+    viewModel: GeminiViewModel, // Add ViewModel to access connection mode
+    isVoiceDominant: Boolean = false
 ) {
     val focusRequester = remember { FocusRequester() }
     val listState = rememberTransformingLazyColumnState()
@@ -363,17 +420,12 @@ fun DetailedHistoryScreen(
 
     var isSearchActive by remember { mutableStateOf(false) }
 
-    val groupedHistory = remember(searchResults) {
-        derivedStateOf {
-            val now = System.currentTimeMillis()
-            searchResults.groupBy { chat ->
-                val diff = now - chat.timestamp
-                when {
-                    diff < 24 * 60 * 60 * 1000L && isSameDay(now, chat.timestamp) -> "Today"
-                    diff < 48 * 60 * 60 * 1000L -> "Yesterday"
-                    else -> "Past Chats"
-                }
-            }
+    val groupedHistory by produceState<Map<String, List<Conversation>>>(
+        initialValue = emptyMap(),
+        key1 = searchResults
+    ) {
+        value = withContext(Dispatchers.Default) {
+            groupConversationsByRecency(searchResults)
         }
     }
 
@@ -419,8 +471,8 @@ fun DetailedHistoryScreen(
                         horizontalAlignment = Alignment.CenterHorizontally
                     ) {
                         // Network Indicator at the top
-                        NetworkIndicator(viewModel = viewModel)
-                        Spacer(modifier = Modifier.height(4.dp))
+//                        NetworkIndicator(viewModel = viewModel)
+//                        Spacer(modifier = Modifier.height(4.dp))
                         
                         Row(
                             modifier = Modifier.fillMaxWidth(),
@@ -454,14 +506,17 @@ fun DetailedHistoryScreen(
             }
 
             if (!isSearchActive || searchQuery.isEmpty()) {
+
                 item {
+                    val newChatIcon = if (isVoiceDominant) Icons.Default.Mic else Icons.Default.Edit
+                    val newChatLabel = if (isVoiceDominant) "New Voice Chat" else "New Conversation"
                     Chip(
                         onClick = onNewChatClick,
-                        label = { Text("New Conversation") },
-                        icon = { Icon(Icons.Rounded.Add, "Create") },
+                        label = { Text(newChatLabel) },
+                        icon = { Icon(newChatIcon, "Create") },
                         colors = ChipDefaults.gradientBackgroundChipColors(
-                            startBackgroundColor = colors.surface,
-                            endBackgroundColor = colors.surface.copy(alpha = 0.8f)
+                            startBackgroundColor = colors.primary.copy(alpha = 0.42f),
+                            endBackgroundColor = colors.surface.copy(alpha = 0.96f)
                         ),
                         shape = RoundedCornerShape(24.dp),
                         modifier = Modifier.fillMaxWidth()
@@ -469,7 +524,7 @@ fun DetailedHistoryScreen(
                 }
             }
 
-            groupedHistory.value.forEach { (header, chats) ->
+            groupedHistory.forEach { (header, chats) ->
                 item {
                     Text(
                         text = header.uppercase(),
@@ -517,6 +572,37 @@ fun isSameDay(t1: Long, t2: Long): Boolean {
     val cal2 = java.util.Calendar.getInstance().apply { timeInMillis = t2 }
     return cal1.get(java.util.Calendar.DAY_OF_YEAR) == cal2.get(java.util.Calendar.DAY_OF_YEAR) &&
             cal1.get(java.util.Calendar.YEAR) == cal2.get(java.util.Calendar.YEAR)
+}
+
+private fun groupConversationsByRecency(
+    conversations: List<Conversation>,
+    now: Long = System.currentTimeMillis()
+): Map<String, List<Conversation>> {
+    return conversations.groupBy { chat ->
+        val diff = now - chat.timestamp
+        when {
+            diff < 24 * 60 * 60 * 1000L && isSameDay(now, chat.timestamp) -> "Today"
+            diff < 48 * 60 * 60 * 1000L -> "Yesterday"
+            else -> "Past Chats"
+        }
+    }
+}
+
+private fun formatFullModelName(modelId: String): String {
+    val rawName = modelId.substringAfter('/', modelId).substringBefore(':')
+    if (rawName.isBlank()) return "AI Assistant"
+    return rawName
+        .split('-', '_')
+        .filter { it.isNotBlank() }
+        .joinToString(" ") { token ->
+            when {
+                token.all { it.isDigit() || it == '.' } -> token
+                token.length <= 3 -> token.uppercase()
+                else -> token.replaceFirstChar { c ->
+                    if (c.isLowerCase()) c.titlecase() else c.toString()
+                }
+            }
+        }
 }
 
 
@@ -589,11 +675,23 @@ fun LiteHistoryScreen(
     onChatClick: (Long) -> Unit,
     onBookmarkClick: (Long, Boolean) -> Unit,
     onSettingsClick: () -> Unit,
-    viewModel: GeminiViewModel
+    isVoiceDominant: Boolean = false
 ) {
     val listState = rememberTransformingLazyColumnState()
     val focusRequester = remember { FocusRequester() }
     val colors = LocalForgeIntColors.current
+    val onSettingsClickState by rememberUpdatedState(onSettingsClick)
+    val onNewChatClickState by rememberUpdatedState(onNewChatClick)
+    val onChatClickState by rememberUpdatedState(onChatClick)
+    val onBookmarkClickState by rememberUpdatedState(onBookmarkClick)
+    val newChatBackground = remember(colors.primary, colors.surface) {
+        Brush.horizontalGradient(
+            listOf(
+                colors.primary.copy(alpha = 0.42f),
+                colors.surface.copy(alpha = 0.96f)
+            )
+        )
+    }
 
     LaunchedEffect(Unit) {
         focusRequester.requestFocus()
@@ -623,7 +721,7 @@ fun LiteHistoryScreen(
                             tint = Color.Gray,
                             modifier = Modifier
                                 .size(24.dp)
-                                .clickable(onClick = onSettingsClick)
+                                .clickable(onClick = onSettingsClickState)
                         )
                     }
                 }
@@ -631,19 +729,21 @@ fun LiteHistoryScreen(
 
             // Manual "Chip" (Row + Box)
             item {
+                val newChatIcon = if (isVoiceDominant) Icons.Default.Mic else Icons.Rounded.Create
+                val newChatLabel = if (isVoiceDominant) "Voice Chat" else "New Chat"
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
                         .height(40.dp)
                         .clip(RoundedCornerShape(20.dp))
-                        .background(colors.surface)
-                        .clickable(onClick = onNewChatClick)
+                        .background(newChatBackground)
+                        .clickable(onClick = onNewChatClickState)
                         .padding(horizontal = 12.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Icon(Icons.Rounded.Create, null, tint = colors.primary)
+                    Icon(newChatIcon, null, tint = colors.primary)
                     Spacer(Modifier.width(8.dp))
-                    Text("New Chat", color = Color.White)
+                    Text(newChatLabel, color = Color.White)
                 }
             }
 
@@ -653,42 +753,79 @@ fun LiteHistoryScreen(
                 key = { it.id },
                 contentType = { "history_item" }
             ) { chat ->
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(48.dp)
-                        .clip(RoundedCornerShape(8.dp))
-                        .background(colors.surface)
-                        .clickable { onChatClick(chat.id); convoID.conID.value = chat.id.toInt() }
-                        .padding(horizontal = 10.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(
-                        text = chat.summary,
-                        color = Color.White,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f)
-                    )
-
-                    // Simple clickable region for bookmark
-                    Box(
-                        modifier = Modifier
-                            .size(32.dp)
-                            .clickable { onBookmarkClick(chat.id, chat.isBookmarked) },
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Icon(
-                            imageVector = if (chat.isBookmarked) Icons.Default.Bookmark else Icons.Default.BookmarkBorder,
-                            contentDescription = null,
-                            tint = if (chat.isBookmarked) Color(0xFFFDD835) else Color.Gray,
-                            modifier = Modifier.size(18.dp)
-                        )
-                    }
-                }
+                LiteHistoryChatRow(
+                    chat = chat,
+                    colors = colors,
+                    onChatClick = onChatClickState,
+                    onBookmarkClick = onBookmarkClickState
+                )
             }
         }
     }
+}
+
+@Composable
+private fun LiteHistoryChatRow(
+    chat: Conversation,
+    colors: com.example.forgeint.presentation.theme.ForgeIntColors,
+    onChatClick: (Long) -> Unit,
+    onBookmarkClick: (Long, Boolean) -> Unit
+) {
+    val haptic = LocalHapticFeedback.current
+    val rowBackground = remember(chat.isBookmarked, colors.primary, colors.surface) {
+        if (chat.isBookmarked) {
+            Brush.horizontalGradient(
+                listOf(
+                    colors.primary.copy(alpha = 0.18f),
+                    colors.surface
+                )
+            )
+        } else {
+            Brush.horizontalGradient(listOf(colors.surface, colors.surface))
+        }
+    }
+
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(48.dp)
+            .clip(RoundedCornerShape(8.dp))
+            .background(rowBackground)
+            .clickable {
+                onChatClick(chat.id)
+                convoID.conID.value = chat.id.toInt()
+            }
+            .padding(horizontal = 10.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            text = chat.summary,
+            color = Color.White,
+            maxLines = 3,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f)
+        )
+
+        Box(
+            modifier = Modifier
+                .size(32.dp)
+                .clickable {
+                    val becomingBookmarked = !chat.isBookmarked
+                    haptic.performHapticFeedback(
+                        if (becomingBookmarked) HapticFeedbackType.LongPress else HapticFeedbackType.TextHandleMove
+                    )
+                    onBookmarkClick(chat.id, chat.isBookmarked)
+                },
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(
+                imageVector = if (chat.isBookmarked) Icons.Default.Bookmark else Icons.Default.BookmarkBorder,
+            contentDescription = null,
+            tint = if (chat.isBookmarked) Color(0xFFFDD835) else Color.Gray,
+            modifier = Modifier.size(18.dp)
+        )
+    }
+}
 }
 
 // ==========================================
@@ -708,11 +845,12 @@ fun DetailedChatScreen(
     messages: List<Message>,
     streamingMessageFlow: StateFlow<String?>,
     isThinkingFlow: StateFlow<Boolean>,
+    loadingBurstFlow: StateFlow<Boolean>,
+    isGenerating: Boolean,
     onReplyClick: () -> Unit,
     onVoiceResult: (String) -> Unit,
     onDeleteClick: () -> Unit,
     onSwapModelClick: () -> Unit,
-    isLoading: Boolean,
     onBookmarkClick: (Long, Boolean) -> Unit,
     loadMoreMessages: () -> Unit,
     isHistoryLoading: Boolean,
@@ -720,6 +858,9 @@ fun DetailedChatScreen(
     isBookmarked: Boolean,
     onTryAgain: () -> Unit,
     onWebsearchClick: () -> Unit,
+    onStopResponse: () -> Unit,
+    isWebSearchEnabled: Boolean,
+    isWebSearching: Boolean,
     isVoiceDominant: Boolean = false
 ) {
     val listState = rememberScalingLazyListState()
@@ -727,15 +868,8 @@ fun DetailedChatScreen(
     val context = LocalContext.current
     val settingsManager = remember { SettingsManager(context) }
     val rawModelName by settingsManager.selectedModel.collectAsStateWithLifecycle(initialValue = "")
-    val currentFullText by streamingMessageFlow.collectAsStateWithLifecycle(initialValue = null)
-    val hasStreamingText by remember(currentFullText) {
-        derivedStateOf { !currentFullText.isNullOrEmpty() }
-    }
     val colors = LocalForgeIntColors.current
     var isVoiceActive by remember { mutableStateOf(false) }
-    val sentenceDelimiters = remember { charArrayOf('.', '!', '?', '\n') }
-
-    val showBezelLoadingOverlay = isLoading && !hasStreamingText
     val coroutineScope = rememberCoroutineScope()
     val isThinking by isThinkingFlow.collectAsStateWithLifecycle()
     
@@ -763,15 +897,18 @@ fun DetailedChatScreen(
     // --- TTS Logic ---
     val tts = remember { mutableStateOf<TextToSpeech?>(null) }
     val isTtsReady = remember { mutableStateOf(false) }
-    var lastReadIndex by remember { mutableIntStateOf(0) }
+    var manualSpeechEnabled by remember { mutableStateOf(false) }
+    var activeSpeechUtteranceId by remember { mutableStateOf<String?>(null) }
+    var pendingSpeechRequest by remember { mutableStateOf<Pair<String, String>?>(null) }
 
     // Keep TTS fully disabled unless voice-dominant mode is active to save battery.
-    DisposableEffect(context, isVoiceDominant) {
-        if (!isVoiceDominant) {
+    DisposableEffect(context, isVoiceDominant, manualSpeechEnabled) {
+        if (!isVoiceDominant && !manualSpeechEnabled) {
             tts.value?.stop()
             tts.value?.shutdown()
             tts.value = null
             isTtsReady.value = false
+            activeSpeechUtteranceId = null
             onDispose { }
         } else {
             val speech = TextToSpeech(context) { status ->
@@ -791,10 +928,15 @@ fun DetailedChatScreen(
 
     // Handle TTS Progress and Auto-Mic
     LaunchedEffect(isTtsReady.value, isVoiceDominant) {
-        if (!isVoiceDominant || !isTtsReady.value) return@LaunchedEffect
+        if (!isTtsReady.value) return@LaunchedEffect
         tts.value?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
-            override fun onStart(utteranceId: String?) {}
+            override fun onStart(utteranceId: String?) {
+                activeSpeechUtteranceId = utteranceId
+            }
             override fun onDone(utteranceId: String?) {
+                if (activeSpeechUtteranceId == utteranceId) {
+                    activeSpeechUtteranceId = null
+                }
                 if (utteranceId == "final_segment" && isVoiceDominant) {
                     coroutineScope.launch {
                         delay(500)
@@ -802,82 +944,26 @@ fun DetailedChatScreen(
                     }
                 }
             }
-            override fun onError(utteranceId: String?) {}
+            override fun onError(utteranceId: String?) {
+                if (activeSpeechUtteranceId == utteranceId) {
+                    activeSpeechUtteranceId = null
+                }
+            }
         })
     }
 
-    fun findLastDelimiterIndex(text: String, startIndex: Int, delimiters: CharArray): Int {
-        if (startIndex >= text.length) return -1
-        val unread = text.substring(startIndex)
-        var lastLocalIndex = -1
-        delimiters.forEach { delimiter ->
-            val idx = unread.lastIndexOf(delimiter)
-            if (idx > lastLocalIndex) lastLocalIndex = idx
-        }
-        return if (lastLocalIndex >= 0) startIndex + lastLocalIndex else -1
+    LaunchedEffect(isTtsReady.value, pendingSpeechRequest) {
+        if (!isTtsReady.value) return@LaunchedEffect
+        val request = pendingSpeechRequest ?: return@LaunchedEffect
+        tts.value?.stop()
+        activeSpeechUtteranceId = request.first
+        tts.value?.speak(request.second, TextToSpeech.QUEUE_FLUSH, null, request.first)
+        pendingSpeechRequest = null
     }
 
-    // Read segments during streaming
-    LaunchedEffect(currentFullText, isTtsReady.value, isVoiceDominant) {
-        if (!isVoiceDominant || !isTtsReady.value || currentFullText.isNullOrEmpty()) {
-            if (currentFullText == null && lastReadIndex > 0) {
-                lastReadIndex = 0
-            }
-            return@LaunchedEffect
-        }
-
-        val textToScan = currentFullText!!
-        val lastPunct = findLastDelimiterIndex(textToScan, lastReadIndex, sentenceDelimiters)
-
-        if (lastPunct >= lastReadIndex) {
-            val segment = textToScan.substring(lastReadIndex, lastPunct + 1).trim()
-            if (segment.isNotEmpty()) {
-                tts.value?.speak(segment, TextToSpeech.QUEUE_ADD, null, "segment_$lastReadIndex")
-                lastReadIndex = lastPunct + 1
-            }
-        }
-    }
-
-    val isStreamingObserved by remember(currentFullText) {
-        derivedStateOf { !currentFullText.isNullOrEmpty() }
-    }
-    val prevIsStreaming = remember { mutableStateOf(false) }
-    
-    // Read the final part when streaming finishes
-    LaunchedEffect(isStreamingObserved, isVoiceDominant, isTtsReady.value) {
-        if (!isVoiceDominant || !isTtsReady.value) {
-            prevIsStreaming.value = isStreamingObserved
-            return@LaunchedEffect
-        }
-
-        if (prevIsStreaming.value && !isStreamingObserved) {
-            // Streaming just finished, speak the last message's remaining text
-            val lastMsg = messages.lastOrNull()?.text ?: ""
-            val remainingText = if (lastMsg.length > lastReadIndex) lastMsg.substring(lastReadIndex).trim() else ""
-            if (remainingText.isNotEmpty()) {
-                tts.value?.speak(remainingText, TextToSpeech.QUEUE_ADD, null, "final_segment")
-            } else {
-                // Nothing left to speak, but we need to trigger mic if we didn't just speak
-                triggerVoiceInput()
-            }
-        }
-        prevIsStreaming.value = isStreamingObserved
-    }
-
-    val isStreaming by remember(currentFullText) {
-        derivedStateOf { !currentFullText.isNullOrEmpty() }
-    }
-
-    val displayName = remember(rawModelName) {
-        when (rawModelName) {
-            "google/gemma-3n-e4b-it:free" -> "Gemma E4B"
-            "google/gemma-3n-e2b-it:free" -> "Gemma E2B"
-            "google/gemma-3-27b-it:free" -> "Gemma 3.27B"
-            "google/gemma-2-9b-it:free" -> "Gemma 2.9B"
-            "openai/gpt-oss-20b:free" -> "GPT OSS 20B"
-            "meta-llama/llama-3.3-70b-instruct:free" -> "Llama 3.3 70B"
-            "cognitivecomputations/dolphin-mistral-24b-venice-edition:free" -> "Dolphin Mistral 24B"
-            else -> "AI Assistant"
+    val displayName by produceState(initialValue = "AI Assistant", key1 = rawModelName) {
+        value = withContext(Dispatchers.Default) {
+            formatFullModelName(rawModelName)
         }
     }
 
@@ -914,16 +1000,16 @@ fun DetailedChatScreen(
 
     // Avoid unnecessary scroll animations to reduce work and battery drain.
     var lastAutoScrollTarget by remember { mutableIntStateOf(-1) }
-    LaunchedEffect(messages.size, isStreaming, isThinking) {
+    LaunchedEffect(messages.size, isThinking) {
         if (messages.isNotEmpty()) {
-            val target = if (isStreaming || isThinking) {
+            val target = if (isThinking) {
                 replyChipIndex
             } else {
                 (streamingIndex - 1).coerceAtLeast(0)
             }
 
             if (target != lastAutoScrollTarget) {
-                if (isStreaming || isThinking) {
+                if (isThinking) {
                     listState.scrollToItem(target)
                 } else {
                     listState.animateScrollToItem(target)
@@ -970,7 +1056,24 @@ fun DetailedChatScreen(
                     geminiShape = geminiShape,
                     userTextColor = userTextColor,
                     geminiTextColor = geminiTextColor,
-                    displayName = displayName
+                    displayName = displayName,
+                    isSpeechActive = activeSpeechUtteranceId == "msg_${msg.id}",
+                    onToggleSpeech = { utteranceId, text ->
+                        if (activeSpeechUtteranceId == utteranceId) {
+                            tts.value?.stop()
+                            activeSpeechUtteranceId = null
+                            if (!isVoiceDominant) manualSpeechEnabled = false
+                        } else {
+                            if (!isTtsReady.value) {
+                                manualSpeechEnabled = true
+                                pendingSpeechRequest = utteranceId to text
+                            } else {
+                                tts.value?.stop()
+                                activeSpeechUtteranceId = utteranceId
+                                tts.value?.speak(text, TextToSpeech.QUEUE_FLUSH, null, utteranceId)
+                            }
+                        }
+                    }
                 )
             }
 
@@ -994,6 +1097,15 @@ fun DetailedChatScreen(
                 }
             }
 
+            if (isWebSearching) {
+                item {
+                    WebSearchLoadingBubble(
+                        displayName = displayName,
+                        colors = colors
+                    )
+                }
+            }
+
             item {
                 StreamingMessageCard(
                     streamingFlow = streamingMessageFlow,
@@ -1001,7 +1113,24 @@ fun DetailedChatScreen(
                     geminiTextColor = geminiTextColor,
                     isUser = false,
                     displayName = displayName,
-                    onTryAgain = onTryAgain
+                    onTryAgain = onTryAgain,
+                    isSpeechActive = activeSpeechUtteranceId == "streaming_message",
+                    onToggleSpeech = { utteranceId, text ->
+                        if (activeSpeechUtteranceId == utteranceId) {
+                            tts.value?.stop()
+                            activeSpeechUtteranceId = null
+                            if (!isVoiceDominant) manualSpeechEnabled = false
+                        } else {
+                            if (!isTtsReady.value) {
+                                manualSpeechEnabled = true
+                                pendingSpeechRequest = utteranceId to text
+                            } else {
+                                tts.value?.stop()
+                                activeSpeechUtteranceId = utteranceId
+                                tts.value?.speak(text, TextToSpeech.QUEUE_FLUSH, null, utteranceId)
+                            }
+                        }
+                    }
                 )
             }
 
@@ -1032,12 +1161,14 @@ fun DetailedChatScreen(
                                 .size(72.dp)
                                 .clip(CircleShape)
                                 .background(colors.primary)
-                                .clickable { triggerVoiceInput() },
+                                .clickable {
+                                    if (isGenerating) onStopResponse() else triggerVoiceInput()
+                                },
                             contentAlignment = Alignment.Center
                         ) {
                             Icon(
-                                Icons.Default.Mic,
-                                contentDescription = "Voice Input",
+                                if (isGenerating) Icons.Default.Stop else Icons.Default.Mic,
+                                contentDescription = if (isGenerating) "Stop Response" else "Voice Input",
                                 tint = Color.Black,
                                 modifier = Modifier.size(36.dp)
                             )
@@ -1066,6 +1197,32 @@ fun DetailedChatScreen(
                             contentPadding = PaddingValues(horizontal = 6.dp, vertical = 2.dp)
                         )
                     }
+                }
+                item {
+                    Chip(
+                        onClick = onWebsearchClick,
+                        label = {
+                            Text(
+                                if (isWebSearchEnabled) "Web Search On" else "Web Search Off",
+                                style = MaterialTheme.typography.caption2,
+                                maxLines = 1
+                            )
+                        },
+                        icon = { Icon(Icons.Default.Web, null, modifier = Modifier.size(16.dp)) },
+                        colors = if (isWebSearchEnabled) {
+                            ChipDefaults.secondaryChipColors(
+                                backgroundColor = colors.primary.copy(alpha = 0.24f),
+                                contentColor = colors.primary
+                            )
+                        } else {
+                            ChipDefaults.secondaryChipColors()
+                        },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(top = 4.dp)
+                            .height(32.dp),
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+                    )
                 }
             } else {
                 item {
@@ -1102,20 +1259,24 @@ fun DetailedChatScreen(
                             modifier = Modifier
                                 .size(38.dp)
                                 .clip(CircleShape)
-                                .background(Color(0xFF4285F4))
+                                .background(colors.surface)
                                 .clickable {
-                                    val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-                                        putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-                                        putExtra(RecognizerIntent.EXTRA_PROMPT, "Speak to $displayName")
+                                    if (isGenerating) {
+                                        onStopResponse()
+                                    } else {
+                                        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+                                            putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+                                            putExtra(RecognizerIntent.EXTRA_PROMPT, "Speak to $displayName")
+                                        }
+                                        voiceLauncher.launch(intent)
                                     }
-                                    voiceLauncher.launch(intent)
                                 },
                             contentAlignment = Alignment.Center
                         ) {
                             Icon(
-                                imageVector = Icons.Default.Mic,
-                                contentDescription = "Voice Reply",
-                                tint = Color.White,
+                                imageVector = if (isGenerating) Icons.Default.Stop else Icons.Default.Mic,
+                                contentDescription = if (isGenerating) "Stop Response" else "Voice Reply",
+                                tint = if (isGenerating) Color.Red else colors.primary,
                                 modifier = Modifier.size(18.dp)
                             )
                         }
@@ -1144,19 +1305,43 @@ fun DetailedChatScreen(
                             contentPadding = PaddingValues(horizontal = 6.dp, vertical = 2.dp)
                         )
                         Chip(
-                            onClick = onDeleteClick,
-                            label = { Text("Delete", style = MaterialTheme.typography.caption3) },
-                            icon = { Icon(Icons.Default.Delete, "Delete Chat", modifier = Modifier.size(14.dp)) },
-                            colors = ChipDefaults.secondaryChipColors(
-                                backgroundColor = Color(0xFF4A1111),
-                                contentColor = Color(0xFFFFB4B4)
-                            ),
+                            onClick = onWebsearchClick,
+                            label = {
+                                Text(
+                                    if (isWebSearchEnabled) "Web On" else "Web Off",
+                                    style = MaterialTheme.typography.caption3
+                                )
+                            },
+                            icon = { Icon(Icons.Default.Web, "Toggle Web Search", modifier = Modifier.size(14.dp)) },
+                            colors = if (isWebSearchEnabled) {
+                                ChipDefaults.secondaryChipColors(
+                                    backgroundColor = colors.primary.copy(alpha = 0.22f),
+                                    contentColor = colors.primary
+                                )
+                            } else {
+                                ChipDefaults.secondaryChipColors()
+                            },
                             modifier = Modifier
                                 .weight(1f)
                                 .height(34.dp),
                             contentPadding = PaddingValues(horizontal = 6.dp, vertical = 2.dp)
                         )
                     }
+                }
+                item {
+                    Chip(
+                        onClick = onDeleteClick,
+                        label = { Text("Delete Chat", style = MaterialTheme.typography.caption3) },
+                        icon = { Icon(Icons.Default.Delete, "Delete Chat", modifier = Modifier.size(14.dp)) },
+                        colors = ChipDefaults.secondaryChipColors(
+                            backgroundColor = Color(0xFF4A1111),
+                            contentColor = Color(0xFFFFB4B4)
+                        ),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(34.dp),
+                        contentPadding = PaddingValues(horizontal = 6.dp, vertical = 2.dp)
+                    )
                 }
             }
 
@@ -1176,7 +1361,672 @@ fun DetailedChatScreen(
             }
         }
     }
-    if (showBezelLoadingOverlay) {
+    StreamingVoiceEffects(
+        streamingFlow = streamingMessageFlow,
+        isVoiceDominant = isVoiceDominant,
+        isTtsReady = isTtsReady.value,
+        tts = tts.value,
+        lastPersistedMessageText = messages.lastOrNull()?.text.orEmpty(),
+        onTriggerVoiceInput = triggerVoiceInput
+    )
+    StreamingLoadingOverlay(
+        streamingFlow = streamingMessageFlow,
+        loadingBurstFlow = loadingBurstFlow
+    )
+}
+
+@Composable
+fun VoiceChatScreen(
+    messages: List<Message>,
+    streamingMessageFlow: StateFlow<String?>,
+    isThinkingFlow: StateFlow<Boolean>,
+    isGenerating: Boolean,
+    isWebSearching: Boolean,
+    onVoiceResult: (String) -> Unit,
+    onStopResponse: () -> Unit,
+    onExit: () -> Unit
+) {
+    val context = LocalContext.current
+    val coroutineScope = rememberCoroutineScope()
+    val colors = LocalForgeIntColors.current
+    val latestVoiceResult by rememberUpdatedState(onVoiceResult)
+    val streamingText by streamingMessageFlow.collectAsStateWithLifecycle(initialValue = null)
+    val isThinking by isThinkingFlow.collectAsStateWithLifecycle(initialValue = false)
+    val lastAssistantReply = remember(messages) { messages.lastOrNull { !it.isUser }?.text.orEmpty() }
+    val lastUserPrompt = remember(messages) { messages.lastOrNull { it.isUser }?.text.orEmpty() }
+
+    var isListening by remember { mutableStateOf(false) }
+    var isSpeaking by remember { mutableStateOf(false) }
+    var partialTranscript by remember { mutableStateOf("") }
+    var voiceLevel by remember { mutableFloatStateOf(0.08f) }
+    var recognizerError by remember { mutableStateOf<String?>(null) }
+    var queuedUtterances by remember { mutableIntStateOf(0) }
+    var speechRecognizer by remember { mutableStateOf<SpeechRecognizer?>(null) }
+    val isMicPermissionGranted = remember {
+        mutableStateOf(
+            ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) ==
+                PackageManager.PERMISSION_GRANTED
+        )
+    }
+
+    val tts = remember { mutableStateOf<TextToSpeech?>(null) }
+    val isTtsReady = remember { mutableStateOf(false) }
+    val sentenceDelimiters = remember { charArrayOf('.', '!', '?', '\n') }
+    var lastReadIndex by remember { mutableIntStateOf(0) }
+    var previousStreamingState by remember { mutableStateOf(false) }
+
+    val startListeningState = rememberUpdatedState(newValue = {
+        if (!isMicPermissionGranted.value || isGenerating || isSpeaking || isListening) {
+            Unit
+        } else if (!SpeechRecognizer.isRecognitionAvailable(context)) {
+            recognizerError = "Speech recognition unavailable"
+        } else {
+            partialTranscript = ""
+            recognizerError = null
+            voiceLevel = 0.14f
+            val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+                putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+                putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
+                putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, false)
+                putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
+                putExtra(RecognizerIntent.EXTRA_PROMPT, "Speak to ForgeINT")
+            }
+            speechRecognizer?.startListening(intent)
+        }
+    })
+
+    val micPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        isMicPermissionGranted.value = granted
+        if (granted) {
+            startListeningState.value.invoke()
+        } else {
+            recognizerError = "Microphone permission is required for voice chat"
+        }
+    }
+
+    DisposableEffect(context) {
+        if (!SpeechRecognizer.isRecognitionAvailable(context)) {
+            recognizerError = "Speech recognition unavailable"
+            onDispose { }
+        } else {
+            val recognizer = SpeechRecognizer.createSpeechRecognizer(context)
+            recognizer.setRecognitionListener(object : RecognitionListener {
+                override fun onReadyForSpeech(params: Bundle?) {
+                    isListening = true
+                    recognizerError = null
+                    voiceLevel = 0.16f
+                }
+
+                override fun onBeginningOfSpeech() {
+                    isListening = true
+                }
+
+                override fun onRmsChanged(rmsdB: Float) {
+                    val normalized = ((rmsdB + 2f) / 12f).coerceIn(0.05f, 1f)
+                    voiceLevel = normalized
+                }
+
+                override fun onBufferReceived(buffer: ByteArray?) = Unit
+
+                override fun onEndOfSpeech() {
+                    isListening = false
+                    voiceLevel = 0.1f
+                }
+
+                override fun onError(error: Int) {
+                    isListening = false
+                    voiceLevel = 0.08f
+                    partialTranscript = ""
+                    recognizerError = when (error) {
+                        SpeechRecognizer.ERROR_AUDIO -> "Audio input error"
+                        SpeechRecognizer.ERROR_CLIENT -> null
+                        SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> "Microphone permission missing"
+                        SpeechRecognizer.ERROR_NETWORK, SpeechRecognizer.ERROR_NETWORK_TIMEOUT -> "Network issue while listening"
+                        SpeechRecognizer.ERROR_NO_MATCH -> null
+                        SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> "Recognizer busy"
+                        SpeechRecognizer.ERROR_SERVER -> "Speech server error"
+                        SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> null
+                        else -> "Listening stopped"
+                    }
+                    if (!isGenerating && !isSpeaking && error != SpeechRecognizer.ERROR_CLIENT) {
+                        coroutineScope.launch {
+                            delay(600)
+                            startListeningState.value.invoke()
+                        }
+                    }
+                }
+
+                override fun onResults(results: Bundle?) {
+                    isListening = false
+                    voiceLevel = 0.08f
+                    val spokenText = results
+                        ?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                        ?.firstOrNull()
+                        ?.trim()
+                        .orEmpty()
+                    partialTranscript = spokenText
+                    if (spokenText.isNotEmpty()) {
+                        latestVoiceResult(spokenText)
+                    } else if (!isGenerating && !isSpeaking) {
+                        coroutineScope.launch {
+                            delay(500)
+                            startListeningState.value.invoke()
+                        }
+                    }
+                }
+
+                override fun onPartialResults(partialResults: Bundle?) {
+                    partialTranscript = partialResults
+                        ?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                        ?.firstOrNull()
+                        .orEmpty()
+                }
+
+                override fun onEvent(eventType: Int, params: Bundle?) = Unit
+            })
+            speechRecognizer = recognizer
+            onDispose {
+                recognizer.cancel()
+                recognizer.destroy()
+                speechRecognizer = null
+            }
+        }
+    }
+
+    DisposableEffect(context) {
+        val speech = TextToSpeech(context) { status ->
+            if (status == TextToSpeech.SUCCESS) {
+                isTtsReady.value = true
+            }
+        }
+        speech.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
+            override fun onStart(utteranceId: String?) {
+                queuedUtterances += 1
+                isSpeaking = true
+            }
+
+            override fun onDone(utteranceId: String?) {
+                queuedUtterances = (queuedUtterances - 1).coerceAtLeast(0)
+                if (queuedUtterances == 0) {
+                    isSpeaking = false
+                    voiceLevel = 0.08f
+                }
+                if (utteranceId == "final_segment" && !isGenerating) {
+                    coroutineScope.launch {
+                        delay(450)
+                        startListeningState.value.invoke()
+                    }
+                }
+            }
+
+            override fun onError(utteranceId: String?) {
+                queuedUtterances = (queuedUtterances - 1).coerceAtLeast(0)
+                if (queuedUtterances == 0) {
+                    isSpeaking = false
+                }
+                coroutineScope.launch {
+                    delay(450)
+                    startListeningState.value.invoke()
+                }
+            }
+        })
+        tts.value = speech
+        onDispose {
+            speech.stop()
+            speech.shutdown()
+            tts.value = null
+            isTtsReady.value = false
+            isSpeaking = false
+            queuedUtterances = 0
+        }
+    }
+
+    val speakerMotion = rememberInfiniteTransition(label = "voice_chat_wave")
+    val speakerPhase by speakerMotion.animateFloat(
+        initialValue = 0f,
+        targetValue = (Math.PI * 2).toFloat(),
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 1200, easing = LinearEasing),
+            repeatMode = RepeatMode.Restart
+        ),
+        label = "voice_chat_wave_phase"
+    )
+
+    val targetLevel = when {
+        isListening -> voiceLevel.coerceIn(0.12f, 1f)
+        isSpeaking -> (0.35f + ((kotlin.math.sin(speakerPhase.toDouble()) + 1.0) * 0.18f).toFloat()).coerceAtMost(1f)
+        isGenerating || isThinking || isWebSearching -> 0.2f
+        else -> 0.08f
+    }
+    val animatedLevel by animateFloatAsState(
+        targetValue = targetLevel,
+        animationSpec = tween(durationMillis = 180),
+        label = "voice_chat_level"
+    )
+
+    LaunchedEffect(isMicPermissionGranted.value) {
+        if (isMicPermissionGranted.value) {
+            startListeningState.value.invoke()
+        } else {
+            micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+        }
+    }
+
+    LaunchedEffect(streamingText, isTtsReady.value) {
+        if (!isTtsReady.value || streamingText.isNullOrEmpty()) {
+            if (streamingText == null && lastReadIndex > 0) {
+                lastReadIndex = 0
+            }
+            return@LaunchedEffect
+        }
+
+        val textToScan = streamingText.orEmpty()
+        val lastPunct = findLastDelimiterIndex(textToScan, lastReadIndex, sentenceDelimiters)
+        if (lastPunct >= lastReadIndex) {
+            val segment = textToScan.substring(lastReadIndex, lastPunct + 1).trim()
+            if (segment.isNotEmpty()) {
+                tts.value?.speak(segment, TextToSpeech.QUEUE_ADD, null, "segment_$lastReadIndex")
+                lastReadIndex = lastPunct + 1
+            }
+        }
+    }
+
+    LaunchedEffect(streamingText, lastAssistantReply, isTtsReady.value, isGenerating) {
+        val isStreamingObserved = !streamingText.isNullOrEmpty()
+        if (!isTtsReady.value) {
+            previousStreamingState = isStreamingObserved
+            return@LaunchedEffect
+        }
+
+        if (previousStreamingState && !isStreamingObserved) {
+            val remainingText = if (lastAssistantReply.length > lastReadIndex) {
+                lastAssistantReply.substring(lastReadIndex).trim()
+            } else {
+                ""
+            }
+            if (remainingText.isNotEmpty()) {
+                tts.value?.speak(remainingText, TextToSpeech.QUEUE_ADD, null, "final_segment")
+            } else if (!isGenerating) {
+                startListeningState.value.invoke()
+            }
+            lastReadIndex = 0
+        }
+        previousStreamingState = isStreamingObserved
+    }
+
+    val statusLine = when {
+        recognizerError != null -> recognizerError!!
+        isListening && partialTranscript.isNotBlank() -> partialTranscript
+        isListening -> "Listening..."
+        isWebSearching -> "Searching the web..."
+        isGenerating || isThinking -> "Thinking..."
+        isSpeaking -> "Speaking..."
+        streamingText?.isNotBlank() == true -> streamingText.orEmpty()
+        else -> "Ready for your voice"
+    }
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color.Black)
+    ) {
+        IconButton(
+            onClick = {
+                speechRecognizer?.cancel()
+                tts.value?.stop()
+                onExit()
+            },
+            modifier = Modifier
+                .align(Alignment.TopEnd)
+                .padding(top = 12.dp, end = 12.dp)
+        ) {
+            Icon(
+                imageVector = Icons.Default.Close,
+                contentDescription = "Close voice chat",
+                tint = Color.White
+            )
+        }
+
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(horizontal = 16.dp, vertical = 22.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center
+        ) {
+            Text(
+                text = "Voice Chat",
+                color = Color.White,
+                style = MaterialTheme.typography.title3
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+            Text(
+                text = if (isListening) "Google speech active" else "Always-on voice loop",
+                color = Color(0xFF7E8A97),
+                style = MaterialTheme.typography.caption2
+            )
+            Spacer(modifier = Modifier.height(28.dp))
+            VoiceWaveform(
+                level = animatedLevel,
+                phase = speakerPhase,
+                accent = colors.primary,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(120.dp)
+            )
+            Spacer(modifier = Modifier.height(20.dp))
+            Text(
+                text = statusLine.take(140),
+                color = Color.White,
+                textAlign = TextAlign.Center,
+                style = MaterialTheme.typography.body2,
+                maxLines = 4
+            )
+            Spacer(modifier = Modifier.height(14.dp))
+            if (lastUserPrompt.isNotBlank()) {
+                Text(
+                    text = "You: ${lastUserPrompt.take(80)}",
+                    color = Color(0xFF8A97A6),
+                    textAlign = TextAlign.Center,
+                    style = MaterialTheme.typography.caption2,
+                    maxLines = 2
+                )
+                Spacer(modifier = Modifier.height(6.dp))
+            }
+            if (lastAssistantReply.isNotBlank()) {
+                Text(
+                    text = "Forge: ${lastAssistantReply.take(96)}",
+                    color = colors.primary.copy(alpha = 0.9f),
+                    textAlign = TextAlign.Center,
+                    style = MaterialTheme.typography.caption2,
+                    maxLines = 3
+                )
+            }
+            Spacer(modifier = Modifier.height(26.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp, Alignment.CenterHorizontally)
+            ) {
+                Chip(
+                    onClick = {
+                        speechRecognizer?.cancel()
+                        tts.value?.stop()
+                        queuedUtterances = 0
+                        isSpeaking = false
+                        startListeningState.value.invoke()
+                    },
+                    label = { Text(if (isListening) "Reset Mic" else "Listen") },
+                    icon = { Icon(Icons.Default.Mic, contentDescription = null) },
+                    colors = ChipDefaults.secondaryChipColors(
+                        backgroundColor = Color(0xFF101417),
+                        contentColor = Color.White
+                    ),
+                    modifier = Modifier.weight(1f)
+                )
+                Chip(
+                    onClick = {
+                        speechRecognizer?.cancel()
+                        tts.value?.stop()
+                        queuedUtterances = 0
+                        isSpeaking = false
+                        if (isGenerating) onStopResponse()
+                    },
+                    label = { Text(if (isGenerating || isSpeaking) "Stop" else "Quiet") },
+                    icon = { Icon(Icons.Default.Stop, contentDescription = null) },
+                    colors = ChipDefaults.secondaryChipColors(
+                        backgroundColor = Color(0xFF1A0F10),
+                        contentColor = Color(0xFFFFB4AB)
+                    ),
+                    modifier = Modifier.weight(1f)
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun VoiceWaveform(
+    level: Float,
+    phase: Float,
+    accent: Color,
+    modifier: Modifier = Modifier
+) {
+    Canvas(modifier = modifier) {
+        val centerY = size.height / 2f
+        val barCount = 17
+        val spacing = size.width / (barCount + 1)
+        val minBar = size.height * 0.08f
+        val maxExtra = size.height * 0.34f * level.coerceIn(0f, 1f)
+
+        for (index in 0 until barCount) {
+            val x = spacing * (index + 1)
+            val wave = kotlin.math.sin(phase + (index * 0.48f)).toFloat()
+            val envelope = 1f - (kotlin.math.abs(index - (barCount - 1) / 2f) / (barCount / 2f + 0.3f))
+            val barHeight = minBar + (wave * 0.5f + 0.5f) * maxExtra * envelope.coerceAtLeast(0.25f)
+            val lineColor = androidx.compose.ui.graphics.lerp(
+                Color(0xFF1A1A1A),
+                accent,
+                (0.25f + level * 0.75f).coerceIn(0f, 1f)
+            )
+
+            drawLine(
+                color = lineColor,
+                start = Offset(x, centerY - barHeight),
+                end = Offset(x, centerY + barHeight),
+                strokeWidth = 7.dp.toPx(),
+                cap = StrokeCap.Round
+            )
+        }
+
+        drawLine(
+            color = accent.copy(alpha = 0.16f),
+            start = Offset(0f, centerY),
+            end = Offset(size.width, centerY),
+            strokeWidth = 1.5.dp.toPx(),
+            cap = StrokeCap.Round
+        )
+    }
+}
+
+@Composable
+fun ModelSettingsScreen(
+    currentModelName: String,
+    currentPersonaName: String,
+    currentMessageLength: String,
+    onNavigateToModelSelect: () -> Unit,
+    onNavigateToPersona: () -> Unit,
+    onNavigateToMessageLength: () -> Unit,
+    onNavigateToApiKey: () -> Unit
+) {
+    val listState = rememberTransformingLazyColumnState()
+    val focusRequester = remember { FocusRequester() }
+    val context = LocalContext.current
+    val settingsManager = remember { SettingsManager(context) }
+    val isCustomApiKeyEnabled by settingsManager.isCustomApiKeyEnabled.collectAsStateWithLifecycle(initialValue = false)
+    val currentApiKey by settingsManager.apiKey.collectAsStateWithLifecycle(initialValue = "")
+    val colors = LocalForgeIntColors.current
+
+    LaunchedEffect(Unit) {
+        focusRequester.requestFocus()
+    }
+
+    Scaffold(
+        positionIndicator = { ScrollIndicator(state = listState) }
+    ) {
+        TransformingLazyColumn(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(colors.background)
+                .focusRequester(focusRequester)
+                .focusable(),
+            state = listState,
+            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 40.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            item {
+                Text("Model Settings", style = MaterialTheme.typography.title3, color = colors.botText)
+            }
+            item {
+                Chip(
+                    onClick = onNavigateToApiKey,
+                    label = { Text("Custom API Key", color = colors.botText) },
+                    secondaryLabel = {
+                        val status = if (isCustomApiKeyEnabled) {
+                            if (currentApiKey.isNotBlank()) {
+                                "Enabled: ${currentApiKey.take(4)}...${currentApiKey.takeLast(4)}"
+                            } else {
+                                "Enabled, key not set"
+                            }
+                        } else {
+                            "Disabled"
+                        }
+                        Text(
+                            status,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                            color = colors.userText
+                        )
+                    },
+                    icon = { Icon(Icons.Default.PrivateConnectivity, "API Key", tint = colors.settingsIcon) },
+                    colors = ChipDefaults.gradientBackgroundChipColors(
+                        startBackgroundColor = colors.userBubble,
+                        endBackgroundColor = colors.surface
+                    ),
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+            item {
+                Chip(
+                    onClick = onNavigateToModelSelect,
+                    label = { Text("AI Model", color = colors.botText) },
+                    secondaryLabel = {
+                        Text(currentModelName, maxLines = 2, overflow = TextOverflow.Ellipsis, color = colors.userText)
+                    },
+                    icon = { Icon(Icons.Default.AutoAwesome, "Model", tint = colors.primary) },
+                    colors = ChipDefaults.gradientBackgroundChipColors(
+                        startBackgroundColor = colors.userBubble,
+                        endBackgroundColor = colors.surface
+                    ),
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+            item {
+                Chip(
+                    onClick = onNavigateToPersona,
+                    label = { Text("AI Persona", color = colors.botText) },
+                    secondaryLabel = {
+                        Text(currentPersonaName, maxLines = 2, overflow = TextOverflow.Ellipsis, color = colors.userText)
+                    },
+                    icon = { Icon(Icons.Default.Person, "Persona", tint = colors.replyIcon) },
+                    colors = ChipDefaults.gradientBackgroundChipColors(
+                        startBackgroundColor = colors.userBubble,
+                        endBackgroundColor = colors.surface
+                    ),
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+            item {
+                Chip(
+                    onClick = onNavigateToMessageLength,
+                    label = { Text("Response Length", color = colors.botText) },
+                    secondaryLabel = {
+                        Text(currentMessageLength, maxLines = 1, overflow = TextOverflow.Ellipsis, color = colors.userText)
+                    },
+                    icon = { Icon(Icons.Default.Tune, "Response Length", tint = colors.settingsIcon) },
+                    colors = ChipDefaults.gradientBackgroundChipColors(
+                        startBackgroundColor = colors.userBubble,
+                        endBackgroundColor = colors.surface
+                    ),
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+        }
+    }
+}
+
+private fun findLastDelimiterIndex(text: String, startIndex: Int, delimiters: CharArray): Int {
+    if (startIndex >= text.length) return -1
+    val unread = text.substring(startIndex)
+    var lastLocalIndex = -1
+    delimiters.forEach { delimiter ->
+        val idx = unread.lastIndexOf(delimiter)
+        if (idx > lastLocalIndex) lastLocalIndex = idx
+    }
+    return if (lastLocalIndex >= 0) startIndex + lastLocalIndex else -1
+}
+
+@Composable
+private fun StreamingVoiceEffects(
+    streamingFlow: StateFlow<String?>,
+    isVoiceDominant: Boolean,
+    isTtsReady: Boolean,
+    tts: TextToSpeech?,
+    lastPersistedMessageText: String,
+    onTriggerVoiceInput: () -> Unit
+) {
+    val currentFullText by streamingFlow.collectAsStateWithLifecycle(initialValue = null)
+    val sentenceDelimiters = remember { charArrayOf('.', '!', '?', '\n') }
+    var lastReadIndex by remember { mutableIntStateOf(0) }
+    val isStreamingObserved by remember(currentFullText) {
+        derivedStateOf { !currentFullText.isNullOrEmpty() }
+    }
+    val previousStreamingState = remember { mutableStateOf(false) }
+
+    LaunchedEffect(currentFullText, isTtsReady, isVoiceDominant, tts) {
+        if (!isVoiceDominant || !isTtsReady || currentFullText.isNullOrEmpty()) {
+            if (currentFullText == null && lastReadIndex > 0) {
+                lastReadIndex = 0
+            }
+            return@LaunchedEffect
+        }
+
+        val textToScan = currentFullText ?: return@LaunchedEffect
+        val lastPunct = findLastDelimiterIndex(textToScan, lastReadIndex, sentenceDelimiters)
+        if (lastPunct >= lastReadIndex) {
+            val segment = textToScan.substring(lastReadIndex, lastPunct + 1).trim()
+            if (segment.isNotEmpty()) {
+                tts?.speak(segment, TextToSpeech.QUEUE_ADD, null, "segment_$lastReadIndex")
+                lastReadIndex = lastPunct + 1
+            }
+        }
+    }
+
+    LaunchedEffect(isStreamingObserved, isVoiceDominant, isTtsReady, tts, lastPersistedMessageText) {
+        if (!isVoiceDominant || !isTtsReady) {
+            previousStreamingState.value = isStreamingObserved
+            return@LaunchedEffect
+        }
+
+        if (previousStreamingState.value && !isStreamingObserved) {
+            val remainingText = if (lastPersistedMessageText.length > lastReadIndex) {
+                lastPersistedMessageText.substring(lastReadIndex).trim()
+            } else {
+                ""
+            }
+            if (remainingText.isNotEmpty()) {
+                tts?.speak(remainingText, TextToSpeech.QUEUE_ADD, null, "final_segment")
+            } else {
+                onTriggerVoiceInput()
+            }
+        }
+        previousStreamingState.value = isStreamingObserved
+    }
+}
+
+@Composable
+private fun StreamingLoadingOverlay(
+    streamingFlow: StateFlow<String?>,
+    loadingBurstFlow: StateFlow<Boolean>
+) {
+    val currentFullText by streamingFlow.collectAsStateWithLifecycle(initialValue = null)
+    val showLoadingBurst by loadingBurstFlow.collectAsStateWithLifecycle(initialValue = false)
+    AnimatedVisibility(
+        visible = showLoadingBurst && currentFullText.isNullOrEmpty(),
+        enter = fadeIn(animationSpec = tween(durationMillis = 220, easing = FastOutSlowInEasing)),
+        exit = fadeOut(animationSpec = tween(durationMillis = 280, easing = FastOutSlowInEasing))
+    ) {
         GeminiBezelLoadingIndicator()
     }
 }
@@ -1321,7 +2171,9 @@ fun StreamingMessageCard(
     userTextColor: Color,
     geminiTextColor: Color,
     displayName: String,
-    onTryAgain: () -> Unit
+    onTryAgain: () -> Unit,
+    isSpeechActive: Boolean,
+    onToggleSpeech: (String, String) -> Unit
 ) {
     val textMeasurer = rememberTextMeasurer()
     var canvasSize by remember { mutableStateOf<Size>(Size.Zero) }
@@ -1445,33 +2297,48 @@ fun StreamingMessageCard(
                         .align(Alignment.CenterHorizontally)
                 )
             }
+            if (!isUser && !rawText.isNullOrBlank()) {
+                CompactChip(
+                    onClick = { onToggleSpeech("streaming_message", rawText.orEmpty()) },
+                    label = { Text(if (isSpeechActive) "Stop" else "Speak") },
+                    colors = ChipDefaults.secondaryChipColors(
+                        backgroundColor = if (isSpeechActive) Color(0xFFB71C1C) else colors.surface,
+                        contentColor = if (isSpeechActive) Color.White else colors.primary
+                    ),
+                    modifier = Modifier
+                        .padding(top = 8.dp)
+                        .align(Alignment.CenterHorizontally)
+                )
+            }
         }
     }
 }
 @Composable
 fun PerformanceMonitorOverlay() {
     var cpuUsage by remember { mutableStateOf("CPU: --%") }
-    // FPS monitoring removed to save battery
-    val density = LocalDensity.current
 
     LaunchedEffect(Unit) {
         var lastCpuTime = android.os.Process.getElapsedCpuTime()
         var lastAppTime = SystemClock.uptimeMillis()
 
         while (true) {
-            delay(10000) // Poll every 10 seconds instead of 3
-            val currentCpuTime = android.os.Process.getElapsedCpuTime()
-            val currentAppTime = SystemClock.uptimeMillis()
-            val cpuDelta = currentCpuTime - lastCpuTime
-            val timeDelta = currentAppTime - lastAppTime
-
-            if (timeDelta > 0) {
-                val usage = (cpuDelta * 100) / timeDelta
-                cpuUsage = "CPU: $usage%"
+            delay(5000)
+            val snapshot = withContext(Dispatchers.Default) {
+                val currentCpuTime = android.os.Process.getElapsedCpuTime()
+                val currentAppTime = SystemClock.uptimeMillis()
+                val cpuDelta = currentCpuTime - lastCpuTime
+                val timeDelta = currentAppTime - lastAppTime
+                val label = if (timeDelta > 0) {
+                    "CPU: ${(cpuDelta * 100) / timeDelta}%"
+                } else {
+                    cpuUsage
+                }
+                Triple(label, currentCpuTime, currentAppTime)
             }
 
-            lastCpuTime = currentCpuTime
-            lastAppTime = currentAppTime
+            cpuUsage = snapshot.first
+            lastCpuTime = snapshot.second
+            lastAppTime = snapshot.third
         }
     }
 
@@ -1491,6 +2358,7 @@ fun PerformanceMonitorOverlay() {
 fun SystemTelemetryOverlay() {
     val context = LocalContext.current
     val batteryManager = remember { context.getSystemService(Context.BATTERY_SERVICE) as BatteryManager }
+    val coroutineScope = rememberCoroutineScope()
     
     var telemetryData by remember { mutableStateOf("Initializing HUD...") }
     var tempColor by remember { mutableStateOf(Color.Cyan) }
@@ -1499,19 +2367,24 @@ fun SystemTelemetryOverlay() {
         val receiver = object : android.content.BroadcastReceiver() {
             override fun onReceive(context: Context?, intent: Intent?) {
                 if (intent?.action == Intent.ACTION_BATTERY_CHANGED) {
-                    val tempInt = intent.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, 0)
-                    val tempCelsius = tempInt / 10f
-                    
-                    val pct = batteryManager.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY)
-                    val currentMicroAmps = batteryManager.getLongProperty(BatteryManager.BATTERY_PROPERTY_CURRENT_NOW)
-                    val currentMilliAmps = currentMicroAmps / 1000
+                    coroutineScope.launch {
+                        val snapshot = withContext(Dispatchers.Default) {
+                            val tempInt = intent.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, 0)
+                            val tempCelsius = tempInt / 10f
+                            val pct = batteryManager.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY)
+                            val currentMicroAmps = batteryManager.getLongProperty(BatteryManager.BATTERY_PROPERTY_CURRENT_NOW)
+                            val currentMilliAmps = currentMicroAmps / 1000
+                            val label = "BAT: $pct% | DRAW: ${currentMilliAmps}mA\nTEMP: ${tempCelsius}\u00B0C"
+                            val color = when {
+                                tempCelsius < 35 -> Color.Green
+                                tempCelsius < 40 -> Color.Yellow
+                                else -> Color.Red
+                            }
+                            label to color
+                        }
 
-                    telemetryData = "BAT: $pct% | DRAW: ${currentMilliAmps}mA\nTEMP: ${tempCelsius}°C"
-                    
-                    tempColor = when {
-                        tempCelsius < 35 -> Color.Green
-                        tempCelsius < 40 -> Color.Yellow
-                        else -> Color.Red
+                        telemetryData = snapshot.first
+                        tempColor = snapshot.second
                     }
                 }
             }
@@ -1543,10 +2416,12 @@ fun MemoryMonitorOverlay() {
 
     LaunchedEffect(Unit) {
         while (true) {
-            val runtime = Runtime.getRuntime()
-            val usedMem = (runtime.totalMemory() - runtime.freeMemory()) / 1024 / 1024
-            val maxMem = runtime.maxMemory() / 1024 / 1024
-            memoryStats = "RAM: ${usedMem}MB / ${maxMem}MB"
+            memoryStats = withContext(Dispatchers.Default) {
+                val runtime = Runtime.getRuntime()
+                val usedMem = (runtime.totalMemory() - runtime.freeMemory()) / 1024 / 1024
+                val maxMem = runtime.maxMemory() / 1024 / 1024
+                "RAM: ${usedMem}MB / ${maxMem}MB"
+            }
             delay(10000)
         }
     }
@@ -1707,7 +2582,9 @@ fun MessageCard(
     geminiShape: RoundedCornerShape,
     userTextColor: Color,
     geminiTextColor: Color,
-    displayName: String
+    displayName: String,
+    isSpeechActive: Boolean,
+    onToggleSpeech: (String, String) -> Unit
 ) {
     val isUser = msg.isUser
     val alignment = if (isUser) Alignment.CenterEnd else Alignment.CenterStart
@@ -1740,6 +2617,17 @@ fun MessageCard(
                     modifier = Modifier.padding(bottom = 4.dp)
                 )
                 Text(formattedText, style = MaterialTheme.typography.body2)
+                if (!isUser) {
+                    CompactChip(
+                        onClick = { onToggleSpeech("msg_${msg.id}", msg.text) },
+                        label = { Text(if (isSpeechActive) "Stop" else "Speak") },
+                        colors = ChipDefaults.secondaryChipColors(
+                            backgroundColor = if (isSpeechActive) Color(0xFFB71C1C) else colors.surface,
+                            contentColor = if (isSpeechActive) Color.White else colors.primary
+                        ),
+                        modifier = Modifier.padding(top = 6.dp)
+                    )
+                }
             }
         }
     }
@@ -1751,15 +2639,22 @@ fun LiteChatScreen(
     streamingMessageFlow: StateFlow<String?>,
     isTyping: Boolean = false,
     isVoiceDominant: Boolean = false,
+    isWebSearchEnabled: Boolean,
+    isWebSearching: Boolean,
     onReplyClick: () -> Unit,
     onDeleteClick: () -> Unit,
     onSwapModelClick: () -> Unit,
-    onVoiceResult: (String) -> Unit = {}
+    onWebsearchClick: () -> Unit,
+    onVoiceResult: (String) -> Unit = {},
+    onStopResponse: () -> Unit
 ) {
     val listState = rememberScalingLazyListState()
     val colors = LocalForgeIntColors.current
-    val context = LocalContext.current
-    val coroutineScope = rememberCoroutineScope()
+    val onReplyClickState by rememberUpdatedState(onReplyClick)
+    val onDeleteClickState by rememberUpdatedState(onDeleteClick)
+    val onSwapModelClickState by rememberUpdatedState(onSwapModelClick)
+    val onWebsearchClickState by rememberUpdatedState(onWebsearchClick)
+    val onVoiceResultState by rememberUpdatedState(onVoiceResult)
     var isVoiceActive by remember { mutableStateOf(false) }
 
     val voiceLauncher = rememberLauncherForActivityResult(
@@ -1769,7 +2664,7 @@ fun LiteChatScreen(
         if (result.resultCode == android.app.Activity.RESULT_OK) {
             val spokenText = result.data?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)?.firstOrNull()
             if (!spokenText.isNullOrEmpty()) {
-                onVoiceResult(spokenText)
+                onVoiceResultState(spokenText)
             }
         }
     }
@@ -1781,80 +2676,6 @@ fun LiteChatScreen(
             putExtra(RecognizerIntent.EXTRA_PROMPT, "Speak...")
         }
         voiceLauncher.launch(intent)
-    }
-
-    // --- TTS Logic ---
-    val tts = remember { mutableStateOf<TextToSpeech?>(null) }
-    val isTtsReady = remember { mutableStateOf(false) }
-    var lastReadIndex by remember { mutableIntStateOf(0) }
-    val currentFullText by streamingMessageFlow.collectAsStateWithLifecycle()
-
-    DisposableEffect(context) {
-        val speech = TextToSpeech(context) { status ->
-            if (status == TextToSpeech.SUCCESS) {
-                isTtsReady.value = true
-            }
-        }
-        tts.value = speech
-        onDispose {
-            speech.stop()
-            speech.shutdown()
-        }
-    }
-
-    LaunchedEffect(isTtsReady.value) {
-        if (isTtsReady.value) {
-            tts.value?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
-                override fun onStart(utteranceId: String?) {}
-                override fun onDone(utteranceId: String?) {
-                    if (utteranceId == "final_segment" && isVoiceDominant) {
-                        coroutineScope.launch {
-                            delay(500)
-                            triggerVoiceInput()
-                        }
-                    }
-                }
-                override fun onError(utteranceId: String?) {}
-            })
-        }
-    }
-
-    LaunchedEffect(currentFullText, isTtsReady.value) {
-        if (isVoiceDominant && isTtsReady.value && !currentFullText.isNullOrEmpty()) {
-            val textToScan = currentFullText!!
-            val delimiters = listOf('.', '!', '?', '\n')
-            var lastPunct = -1
-            for (d in delimiters) {
-                val idx = textToScan.lastIndexOf(d)
-                if (idx > lastPunct) lastPunct = idx
-            }
-
-            if (lastPunct >= lastReadIndex) {
-                val segment = textToScan.substring(lastReadIndex, lastPunct + 1).trim()
-                if (segment.isNotEmpty()) {
-                    tts.value?.speak(segment, TextToSpeech.QUEUE_ADD, null, "segment_$lastReadIndex")
-                    lastReadIndex = lastPunct + 1
-                }
-            }
-        } else if (currentFullText == null && lastReadIndex > 0) {
-            lastReadIndex = 0
-        }
-    }
-
-    val isStreamingObserved by streamingMessageFlow.map { !it.isNullOrEmpty() }.collectAsStateWithLifecycle(initialValue = false)
-    val prevIsStreaming = remember { mutableStateOf(false) }
-    
-    LaunchedEffect(isStreamingObserved) {
-        if (prevIsStreaming.value && !isStreamingObserved && isVoiceDominant && isTtsReady.value) {
-            val lastMsg = messages.lastOrNull()?.text ?: ""
-            val remainingText = if (lastMsg.length > lastReadIndex) lastMsg.substring(lastReadIndex).trim() else ""
-            if (remainingText.isNotEmpty()) {
-                tts.value?.speak(remainingText, TextToSpeech.QUEUE_ADD, null, "final_segment")
-            } else {
-                triggerVoiceInput()
-            }
-        }
-        prevIsStreaming.value = isStreamingObserved
     }
 
     LaunchedEffect(messages.size, isTyping) {
@@ -1886,68 +2707,15 @@ fun LiteChatScreen(
                 items = messages,
                 key = { it.id }
             ) { msg ->
-                val alignment = if (msg.isUser) Alignment.CenterEnd else Alignment.CenterStart
-                val bg = if (msg.isUser) colors.userBubble else colors.botBubble
-                val txtColor = if (msg.isUser) colors.userText else colors.botText
-
-                Box(modifier = Modifier.fillMaxWidth(), contentAlignment = alignment) {
-                    // Simple Box + Text. No Card overhead.
-                    Text(
-                        text = msg.text,
-                        color = txtColor,
-                        style = MaterialTheme.typography.body2,
-                        modifier = Modifier
-                            .fillMaxWidth(0.95f)
-                            .clip(RoundedCornerShape(
-                                topStart = 12.dp, topEnd = 12.dp,
-                                bottomStart = if (msg.isUser) 12.dp else 2.dp,
-                                bottomEnd = if (msg.isUser) 2.dp else 12.dp
-                            ))
-                            .background(bg)
-                            .padding(horizontal = 10.dp, vertical = 8.dp)
-                    )
-                }
+                LiteChatMessageBubble(msg = msg, colors = colors)
             }
 
             if (isTyping) {
                 item {
-                    Box(
-                        modifier = Modifier.fillMaxWidth(),
-                        contentAlignment = Alignment.CenterStart
-                    ) {
-                        Row(
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(12.dp, 12.dp, 12.dp, 2.dp))
-                                .background(colors.botBubble)
-                                .padding(horizontal = 12.dp, vertical = 8.dp),
-                            horizontalArrangement = Arrangement.spacedBy(4.dp)
-                        ) {
-                            val infiniteTransition = rememberInfiniteTransition(label = "dots")
-                            val dotAlphas = (0..2).map { index ->
-                                infiniteTransition.animateFloat(
-                                    initialValue = 0.2f,
-                                    targetValue = 1f,
-                                    animationSpec = infiniteRepeatable(
-                                        animation = keyframes {
-                                            durationMillis = 600
-                                            0.2f at index * 100
-                                            1f at (index * 100 + 300)
-                                            0.2f at 600
-                                        },
-                                        repeatMode = RepeatMode.Restart
-                                    ),
-                                    label = "dot$index"
-                                )
-                            }
-                            dotAlphas.forEach { alpha ->
-                                Box(
-                                    modifier = Modifier
-                                        .size(6.dp)
-                                        .clip(CircleShape)
-                                        .background(colors.botText.copy(alpha = alpha.value))
-                                )
-                            }
-                        }
+                    if (isWebSearching) {
+                        LiteWebSearchIndicator(colors = colors)
+                    } else {
+                        LiteTypingIndicator(colors = colors)
                     }
                 }
             }
@@ -1971,12 +2739,14 @@ fun LiteChatScreen(
                                 .size(64.dp)
                                 .clip(CircleShape)
                                 .background(colors.primary)
-                                .clickable { triggerVoiceInput() },
+                                .clickable {
+                                    if (isTyping) onStopResponse() else triggerVoiceInput()
+                                },
                             contentAlignment = Alignment.Center
                         ) {
                             Icon(
-                                Icons.Default.Mic,
-                                contentDescription = "Voice Input",
+                                if (isTyping) Icons.Default.Stop else Icons.Default.Mic,
+                                contentDescription = if (isTyping) "Stop Response" else "Voice Input",
                                 tint = Color.Black,
                                 modifier = Modifier.size(32.dp)
                             )
@@ -1985,16 +2755,18 @@ fun LiteChatScreen(
                 }
                 item {
                     Row(
-                        modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp),
-                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 6.dp, vertical = 4.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
                         Row(
                             modifier = Modifier
                                 .weight(1f)
-                                .height(32.dp)
+                                .height(34.dp)
                                 .clip(CircleShape)
                                 .background(colors.replyIcon)
-                                .clickable(onClick = onReplyClick),
+                                .clickable(onClick = onReplyClickState),
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.Center
                         ) {
@@ -2005,10 +2777,10 @@ fun LiteChatScreen(
                         Row(
                             modifier = Modifier
                                 .weight(1f)
-                                .height(32.dp)
+                                .height(34.dp)
                                 .clip(CircleShape)
                                 .background(colors.primary)
-                                .clickable(onClick = onSwapModelClick),
+                                .clickable(onClick = onSwapModelClickState),
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.Center
                         ) {
@@ -2018,16 +2790,46 @@ fun LiteChatScreen(
                         }
                     }
                 }
+                item {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(34.dp)
+                            .padding(horizontal = 6.dp, vertical = 2.dp)
+                            .clip(CircleShape)
+                            .background(
+                                if (isWebSearchEnabled) colors.primary.copy(alpha = 0.82f)
+                                else colors.surface
+                            )
+                            .border(
+                                width = 1.dp,
+                                color = if (isWebSearchEnabled) colors.primary else Color.Gray,
+                                shape = CircleShape
+                            )
+                            .clickable(onClick = onWebsearchClickState),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.Center
+                    ) {
+                        Icon(Icons.Default.Web, null, tint = Color.Black, modifier = Modifier.size(14.dp))
+                        Spacer(Modifier.width(4.dp))
+                        Text(
+                            if (isWebSearchEnabled) "Web Search On" else "Web Search Off",
+                            color = Color.Black,
+                            style = MaterialTheme.typography.caption2,
+                            maxLines = 1
+                        )
+                    }
+                }
             } else {
                 item {
 
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .height(40.dp)
+                            .height(42.dp)
                             .clip(CircleShape)
                             .background(colors.replyIcon)
-                            .clickable(onClick = onReplyClick),
+                            .clickable(onClick = onReplyClickState),
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.Center
                     ) {
@@ -2040,16 +2842,46 @@ fun LiteChatScreen(
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .height(40.dp)
+                            .height(42.dp)
+                            .padding(top = 4.dp)
                             .clip(CircleShape)
                             .background(colors.primary)
-                            .clickable(onClick = onSwapModelClick),
+                            .clickable(onClick = onSwapModelClickState),
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.Center
                     ) {
                         Icon(Icons.Default.AutoAwesome, null, tint = Color.Black)
                         Spacer(Modifier.width(6.dp))
                         Text("Change Model", color = Color.Black, style = MaterialTheme.typography.button)
+                    }
+                }
+                item {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(42.dp)
+                            .padding(top = 4.dp)
+                            .clip(CircleShape)
+                            .background(
+                                if (isWebSearchEnabled) colors.primary.copy(alpha = 0.82f)
+                                else colors.surface
+                            )
+                            .border(
+                                width = 1.dp,
+                                color = if (isWebSearchEnabled) colors.primary else Color.Gray,
+                                shape = CircleShape
+                            )
+                            .clickable(onClick = onWebsearchClickState),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.Center
+                    ) {
+                        Icon(Icons.Default.Web, null, tint = Color.Black)
+                        Spacer(Modifier.width(6.dp))
+                        Text(
+                            if (isWebSearchEnabled) "Web Search On" else "Web Search Off",
+                            color = Color.Black,
+                            style = MaterialTheme.typography.button
+                        )
                     }
                 }
             }
@@ -2059,10 +2891,11 @@ fun LiteChatScreen(
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(40.dp)
+                        .height(42.dp)
+                        .padding(top = 4.dp)
                         .clip(CircleShape)
                         .background(Color.Red)
-                        .clickable(onClick = onDeleteClick),
+                        .clickable(onClick = onDeleteClickState),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.Center
                 ) {
@@ -2074,14 +2907,178 @@ fun LiteChatScreen(
         }
     }
 }
+
+@Composable
+private fun WebSearchLoadingBubble(
+    displayName: String,
+    colors: com.example.forgeint.presentation.theme.ForgeIntColors
+) {
+    Card(
+        onClick = {},
+        backgroundPainter = CardDefaults.cardBackgroundPainter(
+            startBackgroundColor = colors.botBubble,
+            endBackgroundColor = colors.surface.copy(alpha = 0.94f)
+        ),
+        modifier = Modifier.fillMaxWidth(0.9f),
+        shape = RoundedCornerShape(16.dp, 16.dp, 16.dp, 4.dp)
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 10.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            CircularProgressIndicator(
+                modifier = Modifier.size(14.dp),
+                strokeWidth = 2.dp,
+                indicatorColor = colors.primary
+            )
+            Column {
+                Text(
+                    text = "$displayName (Web)",
+                    style = MaterialTheme.typography.caption2,
+                    color = colors.primary
+                )
+                Text(
+                    text = "Searching sources...",
+                    style = MaterialTheme.typography.body2,
+                    color = colors.botText
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun LiteWebSearchIndicator(
+    colors: com.example.forgeint.presentation.theme.ForgeIntColors
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(start = 2.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.Start
+    ) {
+        CircularProgressIndicator(
+            modifier = Modifier.size(12.dp),
+            strokeWidth = 2.dp,
+            indicatorColor = colors.primary
+        )
+        Spacer(Modifier.width(6.dp))
+        Text(
+            text = "Web search...",
+            color = colors.botText.copy(alpha = 0.9f),
+            style = MaterialTheme.typography.caption2
+        )
+    }
+}
+
+@Composable
+private fun LiteChatMessageBubble(
+    msg: Message,
+    colors: com.example.forgeint.presentation.theme.ForgeIntColors
+) {
+    val alignment = if (msg.isUser) Alignment.CenterEnd else Alignment.CenterStart
+    val txtColor = if (msg.isUser) colors.userText else colors.botText
+    val bubbleShape = remember(msg.isUser) {
+        RoundedCornerShape(
+            topStart = 14.dp,
+            topEnd = 14.dp,
+            bottomStart = if (msg.isUser) 14.dp else 3.dp,
+            bottomEnd = if (msg.isUser) 3.dp else 14.dp
+        )
+    }
+    val bubbleBrush = remember(msg.isUser, colors.userBubble, colors.botBubble, colors.surface) {
+        if (msg.isUser) {
+            Brush.linearGradient(
+                listOf(
+                    colors.userBubble.copy(alpha = 0.96f),
+                    colors.userBubble.copy(alpha = 0.82f)
+                )
+            )
+        } else {
+            Brush.linearGradient(
+                listOf(
+                    colors.botBubble.copy(alpha = 0.96f),
+                    colors.surface.copy(alpha = 0.88f)
+                )
+            )
+        }
+    }
+
+    Box(modifier = Modifier.fillMaxWidth(), contentAlignment = alignment) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth(0.95f)
+                .clip(bubbleShape)
+                .background(bubbleBrush)
+                .padding(horizontal = 10.dp, vertical = 8.dp)
+        ) {
+            Text(
+                text = if (msg.isUser) "You" else "Forge",
+                color = txtColor.copy(alpha = 0.75f),
+                style = MaterialTheme.typography.caption3
+            )
+            Spacer(Modifier.height(2.dp))
+            Text(
+                text = msg.text,
+                color = txtColor,
+                style = MaterialTheme.typography.body2
+            )
+        }
+    }
+}
+
+@Composable
+private fun LiteTypingIndicator(
+    colors: com.example.forgeint.presentation.theme.ForgeIntColors
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.Start
+    ) {
+        Icon(
+            imageVector = Icons.Default.AutoAwesome,
+            contentDescription = "AI Typing",
+            tint = colors.primary,
+            modifier = Modifier
+                .size(14.dp)
+                .padding(start = 2.dp, end = 6.dp)
+        )
+        Row(
+            modifier = Modifier
+                .clip(RoundedCornerShape(12.dp, 12.dp, 12.dp, 2.dp))
+                .background(colors.botBubble)
+                .padding(horizontal = 12.dp, vertical = 8.dp),
+            horizontalArrangement = Arrangement.Start
+        ) {
+            Text(
+                text = "Typing...",
+                color = colors.botText.copy(alpha = 0.9f),
+                style = MaterialTheme.typography.caption2
+            )
+        }
+    }
+}
 @Composable
 fun ConnectionSettingsScreen(
     currentHost: String,
     currentPort: String,
+    currentHardwareHost: String,
+    currentHardwarePort: String,
     isLocalEnabled: Boolean,
+    isFunnelEnabled: Boolean,
+    localAuthToken: String,
     onToggleLocal: (Boolean) -> Unit,
+    onToggleFunnel: (Boolean) -> Unit,
     onHostChange: (String) -> Unit,
     onPortChange: (String) -> Unit,
+    onHardwareHostChange: (String) -> Unit,
+    onHardwarePortChange: (String) -> Unit,
+    onAuthTokenChange: (String) -> Unit,
     onTestConnection: () -> Unit,
     testResult: String?,
     isTesting: Boolean,
@@ -2094,22 +3091,52 @@ fun ConnectionSettingsScreen(
     val ipLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.StartActivityForResult()
     ) { result ->
-        val results = RemoteInput.getResultsFromIntent(result.data)
-        val newIp = results?.getCharSequence("ip_input")?.toString()
-        if (newIp != null) {
-            onHostChange(newIp)
-        }
+        if (result.resultCode != android.app.Activity.RESULT_OK) return@rememberLauncherForActivityResult
+        val data = result.data ?: return@rememberLauncherForActivityResult
+        val results = RemoteInput.getResultsFromIntent(data)
+        val newIp = results?.getCharSequence("ip_input")?.toString()?.trim()
+        if (!newIp.isNullOrEmpty()) onHostChange(newIp)
     }
 
     // Launcher for Port Number
     val portLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.StartActivityForResult()
     ) { result ->
-        val results = RemoteInput.getResultsFromIntent(result.data)
-        val newPort = results?.getCharSequence("port_input")?.toString()
-        if (newPort != null) {
-            onPortChange(newPort)
-        }
+        if (result.resultCode != android.app.Activity.RESULT_OK) return@rememberLauncherForActivityResult
+        val data = result.data ?: return@rememberLauncherForActivityResult
+        val results = RemoteInput.getResultsFromIntent(data)
+        val newPort = results?.getCharSequence("port_input")?.toString()?.trim()
+        if (!newPort.isNullOrEmpty()) onPortChange(newPort)
+    }
+
+    val authTokenLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        if (result.resultCode != android.app.Activity.RESULT_OK) return@rememberLauncherForActivityResult
+        val data = result.data ?: return@rememberLauncherForActivityResult
+        val results = RemoteInput.getResultsFromIntent(data)
+        val newToken = results?.getCharSequence("local_auth_token_input")?.toString()?.trim()
+        if (!newToken.isNullOrEmpty()) onAuthTokenChange(newToken)
+    }
+
+    val hardwareIpLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        if (result.resultCode != android.app.Activity.RESULT_OK) return@rememberLauncherForActivityResult
+        val data = result.data ?: return@rememberLauncherForActivityResult
+        val results = RemoteInput.getResultsFromIntent(data)
+        val newIp = results?.getCharSequence("hardware_ip_input")?.toString()?.trim()
+        if (!newIp.isNullOrEmpty()) onHardwareHostChange(newIp)
+    }
+
+    val hardwarePortLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        if (result.resultCode != android.app.Activity.RESULT_OK) return@rememberLauncherForActivityResult
+        val data = result.data ?: return@rememberLauncherForActivityResult
+        val results = RemoteInput.getResultsFromIntent(data)
+        val newPort = results?.getCharSequence("hardware_port_input")?.toString()?.trim()
+        if (!newPort.isNullOrEmpty()) onHardwarePortChange(newPort)
     }
 
     val listState = rememberScalingLazyListState()
@@ -2184,6 +3211,77 @@ fun ConnectionSettingsScreen(
                     )
                 }
 
+                item {
+                    ToggleChip(
+                        checked = isFunnelEnabled,
+                        onCheckedChange = onToggleFunnel,
+                        label = { Text("Use Tailscale Funnel") },
+                        secondaryLabel = {
+                            Text(if (isFunnelEnabled) "Enabled (.ts.net over HTTPS)" else "Disabled")
+                        },
+                        toggleControl = {
+                            Switch(
+                                checked = isFunnelEnabled,
+                                onCheckedChange = null
+                            )
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+
+                item {
+                    Chip(
+                        onClick = {
+                            val intent: Intent = RemoteInputIntentHelper.createActionRemoteInputIntent()
+                            val remoteInputs = listOf(
+                                RemoteInput.Builder("port_input")
+                                    .setLabel("Enter Server Port")
+                                    .build()
+                            )
+                            RemoteInputIntentHelper.putRemoteInputsExtra(intent, remoteInputs)
+                            portLauncher.launch(intent)
+                        },
+                        label = { Text("Server Port") },
+                        secondaryLabel = {
+                            Text(
+                                if (isFunnelEnabled) "Not used in Funnel mode" else currentPort,
+                                color = colors.primary
+                            )
+                        },
+                        icon = { Icon(Icons.Default.Settings, null) },
+                        colors = ChipDefaults.secondaryChipColors(),
+                        modifier = Modifier.fillMaxWidth(),
+                        enabled = !isFunnelEnabled
+                    )
+                }
+
+//                item {
+//                    Chip(
+//                        onClick = {
+//                            val intent: Intent = RemoteInputIntentHelper.createActionRemoteInputIntent()
+//                            val remoteInputs = listOf(
+//                                RemoteInput.Builder("local_auth_token_input")
+//                                    .setLabel("Enter Local Auth Token")
+//                                    .build()
+//                            )
+//                            RemoteInputIntentHelper.putRemoteInputsExtra(intent, remoteInputs)
+//                            authTokenLauncher.launch(intent)
+//                        },
+//                        label = { Text("Local Auth Token") },
+//                        secondaryLabel = {
+//                            val masked = if (localAuthToken.isBlank()) {
+//                                "Optional (recommended with Funnel)"
+//                            } else {
+//                                "Set: ${localAuthToken.take(4)}...${localAuthToken.takeLast(4)}"
+//                            }
+//                            Text(masked, color = colors.primary)
+//                        },
+//                        icon = { Icon(Icons.Default.Settings, null) },
+//                        colors = ChipDefaults.secondaryChipColors(),
+//                        modifier = Modifier.fillMaxWidth()
+//                    )
+//                }
+
 
 
 
@@ -2229,6 +3327,74 @@ fun ConnectionSettingsScreen(
                         )
                     }
                 }
+            }
+
+            item {
+                ListHeader {
+                    Text("Hardware Endpoint", color = colors.settingsIcon)
+                }
+            }
+
+            item {
+                Chip(
+                    onClick = {
+                        val intent: Intent = RemoteInputIntentHelper.createActionRemoteInputIntent()
+                        val remoteInputs = listOf(
+                            RemoteInput.Builder("hardware_ip_input")
+                                .setLabel("Enter Hardware IP/Host")
+                                .build()
+                        )
+                        RemoteInputIntentHelper.putRemoteInputsExtra(intent, remoteInputs)
+                        hardwareIpLauncher.launch(intent)
+                    },
+                    label = { Text("Hardware Host") },
+                    secondaryLabel = {
+                        val displayHost = currentHardwareHost
+                            .removePrefix("https://")
+                            .removePrefix("http://")
+                            .removeSuffix("/")
+                        Text(displayHost, color = colors.primary)
+                    },
+                    icon = { Icon(Icons.Default.Web, null) },
+                    colors = ChipDefaults.secondaryChipColors(),
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+
+            item {
+                val hostLower = currentHardwareHost
+                    .removePrefix("https://")
+                    .removePrefix("http://")
+                    .removeSuffix("/")
+                    .lowercase()
+                val isHardwareTunnel = hostLower.endsWith(".ts.net") ||
+                    hostLower.contains("cloudflare") ||
+                    hostLower.contains("ngrok") ||
+                    hostLower.contains("loclx")
+
+                Chip(
+                    onClick = {
+                        val intent: Intent = RemoteInputIntentHelper.createActionRemoteInputIntent()
+                        val remoteInputs = listOf(
+                            RemoteInput.Builder("hardware_port_input")
+                                .setLabel("Enter Hardware Port")
+                                .build()
+                        )
+                        RemoteInputIntentHelper.putRemoteInputsExtra(intent, remoteInputs)
+                        hardwarePortLauncher.launch(intent)
+                    },
+                    label = { Text("Hardware Port") },
+                    secondaryLabel = {
+                        Text(
+                            if (isHardwareTunnel) "Not used for tunnel hosts" else currentHardwarePort,
+                            color = colors.primary
+                        )
+                    },
+                    icon = { Icon(Icons.Default.Settings, null) },
+                    colors = ChipDefaults.secondaryChipColors(),
+                    modifier = Modifier.fillMaxWidth(),
+                    enabled = !isHardwareTunnel
+                )
             }
 
             item {

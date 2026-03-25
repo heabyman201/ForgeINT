@@ -58,6 +58,24 @@ val MIGRATION_5_6 = object : Migration(5, 6) {
     }
 }
 
+val MIGRATION_6_7 = object : Migration(6, 7) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS `message_embeddings` (
+                `messageId` INTEGER NOT NULL,
+                `vector` BLOB NOT NULL,
+                `model` TEXT NOT NULL,
+                `createdAt` INTEGER NOT NULL,
+                PRIMARY KEY(`messageId`),
+                FOREIGN KEY(`messageId`) REFERENCES `messages`(`id`) ON DELETE CASCADE
+            )
+            """.trimIndent()
+        )
+        db.execSQL("CREATE INDEX IF NOT EXISTS `index_message_embeddings_messageId` ON `message_embeddings` (`messageId`)")
+    }
+}
+
 // --- FTS Entities ---
 @Entity(tableName = "conversations_fts")
 @Fts4(contentEntity = Conversation::class)
@@ -100,6 +118,23 @@ data class Message(
     val timestamp: Long = System.currentTimeMillis()
 )
 
+@Entity(
+    tableName = "message_embeddings",
+    indices = [Index(value = ["messageId"])],
+    foreignKeys = [ForeignKey(
+        entity = Message::class,
+        parentColumns = ["id"],
+        childColumns = ["messageId"],
+        onDelete = ForeignKey.CASCADE
+    )]
+)
+data class MessageEmbedding(
+    @PrimaryKey val messageId: Long,
+    val vector: ByteArray,
+    val model: String = "text-embedding-qwen3-embedding-0.6b",
+    val createdAt: Long = System.currentTimeMillis()
+)
+
 data class ConversationWithMessages(
     @Embedded val conversation: Conversation,
     @Relation(parentColumn = "id", entityColumn = "conversationId")
@@ -132,6 +167,31 @@ interface ChatDao {
     @Query("SELECT * FROM messages WHERE conversationId = :id ORDER BY timestamp DESC LIMIT :limit")
     fun getMessages(id: Long, limit: Int): Flow<List<Message>>
 
+    @Query(
+        """
+        SELECT * FROM conversations
+        WHERE id != :excludeConversationId
+        ORDER BY isBookmarked DESC, timestamp DESC
+        LIMIT :limit
+        """
+    )
+    suspend fun getRecentConversationsForMemory(excludeConversationId: Long, limit: Int = 48): List<Conversation>
+
+    @Query(
+        """
+        SELECT id, conversationId, SUBSTR(text, 1, 1200) AS text, isUser, timestamp
+        FROM (
+            SELECT id, conversationId, text, isUser, timestamp
+            FROM messages
+            WHERE conversationId = :conversationId
+            ORDER BY timestamp DESC
+            LIMIT :limit
+        )
+        ORDER BY timestamp ASC
+        """
+    )
+    suspend fun getRecentMessagesForConversation(conversationId: Long, limit: Int = 18): List<Message>
+
     @Transaction
     @Query("SELECT * FROM conversations WHERE id = :id")
     fun getConversationWithMessages(id: Long): Flow<ConversationWithMessages>
@@ -140,7 +200,13 @@ interface ChatDao {
     suspend fun insertConversation(conversation: Conversation): Long
 
     @Insert
-    suspend fun insertMessage(message: Message)
+    suspend fun insertMessage(message: Message): Long
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertMessageEmbedding(embedding: MessageEmbedding)
+
+    @Query("SELECT * FROM message_embeddings WHERE messageId IN (:messageIds)")
+    suspend fun getEmbeddingsForMessages(messageIds: List<Long>): List<MessageEmbedding>
 
     @Delete
     suspend fun deleteConversation(conversation: Conversation)
@@ -150,6 +216,9 @@ interface ChatDao {
 
     @Query("UPDATE conversations SET isBookmarked = :isBookmarked WHERE id = :id")
     suspend fun toggleBookmark(id: Long, isBookmarked: Boolean)
+
+    @Query("UPDATE conversations SET summary = :summary WHERE id = :id")
+    suspend fun updateConversationSummary(id: Long, summary: String)
 }
 
 // --- Database ---
@@ -157,11 +226,12 @@ interface ChatDao {
     entities = [
         Conversation::class,
         Message::class,
+        MessageEmbedding::class,
         UserTrait::class,
         ConversationFts::class,
         MessageFts::class
     ],
-    version = 6
+    version = 7
 )
 abstract class ChatDatabase : RoomDatabase() {
     abstract fun chatDao(): ChatDao
@@ -179,7 +249,8 @@ abstract class ChatDatabase : RoomDatabase() {
                 )
                     .addMigrations(MIGRATION_2_3)
                     .addMigrations(MIGRATION_3_4)
-                    .addMigrations(MIGRATION_5_6) // Apply the fix
+                    .addMigrations(MIGRATION_5_6)
+                    .addMigrations(MIGRATION_6_7)
                     .setJournalMode(JournalMode.TRUNCATE)
                     .setQueryExecutor(Executors.newSingleThreadExecutor())
                     .fallbackToDestructiveMigration()

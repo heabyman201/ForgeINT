@@ -46,20 +46,42 @@ class HardwareTileService : TileService() {
                 val settingsManager = SettingsManager(this@HardwareTileService)
                 
                 // 1. Resolve Host/Port
-                val host = settingsManager.hostIp.first()
+                val host = settingsManager.hardwareHostIp.first()
+                val hardwarePort = settingsManager.hardwarePort.first()
+                val localAuthToken = settingsManager.localAuthToken.first()
+                val isFunnelEnabled = settingsManager.isFunnelEnabled.first()
                 val cleanHost = host.removePrefix("https://").removePrefix("http://").trim('/')
-                val isTunnel = cleanHost.contains("cloudflare") || cleanHost.contains("ngrok") || cleanHost.contains("loclx")
+                val isTunnel =
+                    isFunnelEnabled ||
+                    cleanHost.endsWith(".ts.net", ignoreCase = true) ||
+                    cleanHost.contains("cloudflare", ignoreCase = true) ||
+                    cleanHost.contains("ngrok", ignoreCase = true) ||
+                    cleanHost.contains("loclx", ignoreCase = true)
                 val hostWithoutPort = cleanHost.substringBefore(":")
+                val resolvedHardwarePort = hardwarePort.trim().ifBlank { "8080" }
 
                 val baseUrl = if (isTunnel) {
                     "https://$cleanHost/"
                 } else {
-                    "http://$hostWithoutPort:8080/"
+                    "http://$hostWithoutPort:${resolvedHardwarePort}/"
+                }
+
+                val headers = buildMap {
+                    if (localAuthToken.isNotBlank()) {
+                        put("Authorization", "Bearer ${localAuthToken.trim()}")
+                    }
+                    if (isTunnel) {
+                        put("User-Agent", "ForgeIntApp")
+                        put("cf-terminate-connection", "true")
+                        if (cleanHost.contains("ngrok", ignoreCase = true)) {
+                            put("ngrok-skip-browser-warning", "true")
+                        }
+                    }
                 }
 
                 // 2. Fetch Data
-                val api = HardwareApi.create(baseUrl)
-                val repo = HardwareRepository(api, baseUrl)
+                val api = HardwareApi.create(baseUrl, headers)
+                val repo = HardwareRepository(api, baseUrl, localAuthToken)
                 val stats = repo.fetchG14Status() // Returns valid stats or stats with errorMessage
 
                 // 3. Logic

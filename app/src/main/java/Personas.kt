@@ -1,6 +1,8 @@
 // In a new file, e.g., /data/Personas.kt or /presentation/Personas.kt
+import androidx.compose.runtime.Immutable
 
 // A simple data class to hold persona details
+@Immutable
 data class Persona(
     val id: String,
     val name: String,

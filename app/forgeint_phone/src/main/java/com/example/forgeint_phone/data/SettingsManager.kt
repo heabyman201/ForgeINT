@@ -20,6 +20,12 @@ class SettingsManager(private val context: Context) {
 
     private val MEMORY_MONITOR = booleanPreferencesKey("memory_monitor")
     private val SYSTEM_TELEMETRY = booleanPreferencesKey("system_telemetry")
+    private val APP_THEME_KEY = stringPreferencesKey("app_theme")
+    private val VOICE_DOMINANT_MODE_KEY = booleanPreferencesKey("voice_dominant_mode")
+    private val API_KEY = stringPreferencesKey("api_key")
+    private val CUSTOM_API_KEY_ENABLED = booleanPreferencesKey("custom_api_key_enabled")
+    private val FUNNEL_ENABLED = booleanPreferencesKey("funnel_enabled")
+    private val LOCAL_AUTH_TOKEN = stringPreferencesKey("local_auth_token")
 
     private val MESSAGE_LENGTH_KEY = stringPreferencesKey("message_length")
 
@@ -57,6 +63,24 @@ val isSystemTelemetryEnabled: Flow<Boolean> = context.dataStore.data
 
     val messageLength: Flow<String> = context.dataStore.data
         .map { it[MESSAGE_LENGTH_KEY] ?: "Normal" }
+
+    val appTheme: Flow<String> = context.dataStore.data
+        .map { it[APP_THEME_KEY] ?: "Default" }
+
+    val isVoiceDominantMode: Flow<Boolean> = context.dataStore.data
+        .map { it[VOICE_DOMINANT_MODE_KEY] ?: false }
+
+    val apiKey: Flow<String> = context.dataStore.data
+        .map { it[API_KEY] ?: "" }
+
+    val isCustomApiKeyEnabled: Flow<Boolean> = context.dataStore.data
+        .map { it[CUSTOM_API_KEY_ENABLED] ?: false }
+
+    val isFunnelEnabled: Flow<Boolean> = context.dataStore.data
+        .map { it[FUNNEL_ENABLED] ?: false }
+
+    val localAuthToken: Flow<String> = context.dataStore.data
+        .map { it[LOCAL_AUTH_TOKEN] ?: DEFAULT_LOCAL_AUTH_TOKEN }
 
     // --- Setters ---
 
@@ -96,5 +120,34 @@ suspend fun setMemoryMonitorEnabled(enabled: Boolean) {
 
     suspend fun setMessageLength(length: String) {
         context.dataStore.edit { it[MESSAGE_LENGTH_KEY] = length }
+    }
+
+    suspend fun setAppTheme(theme: String) {
+        context.dataStore.edit { it[APP_THEME_KEY] = theme }
+    }
+
+    suspend fun setVoiceDominantMode(enabled: Boolean) {
+        context.dataStore.edit { it[VOICE_DOMINANT_MODE_KEY] = enabled }
+    }
+
+    suspend fun setApiKey(key: String) {
+        context.dataStore.edit { it[API_KEY] = key }
+    }
+
+    suspend fun setCustomApiKeyEnabled(enabled: Boolean) {
+        context.dataStore.edit { it[CUSTOM_API_KEY_ENABLED] = enabled }
+    }
+
+    suspend fun setFunnelEnabled(enabled: Boolean) {
+        context.dataStore.edit { it[FUNNEL_ENABLED] = enabled }
+    }
+
+    suspend fun setLocalAuthToken(token: String) {
+        val normalized = token.trim().ifBlank { DEFAULT_LOCAL_AUTH_TOKEN }
+        context.dataStore.edit { it[LOCAL_AUTH_TOKEN] = normalized }
+    }
+
+    companion object {
+        const val DEFAULT_LOCAL_AUTH_TOKEN = "sk-lm-fBt9rGIy:7Dk693RtQlDV5nZSR3or"
     }
 }

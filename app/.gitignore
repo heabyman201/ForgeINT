@@ -1,1 +1,35 @@
 /build
+/.cxx/
+/release/
+/debug/
+
+# Nested module outputs
+**/build/
+**/.cxx/
+**/release/
+**/debug/
+
+# Android artifacts
+*.apk
+*.aab
+*.ap_
+*.dex
+*.class
+*.dm
+
+# App-local secrets and signing files
+google-services.json
+**/google-services.json
+secrets.properties
+signing.properties
+keystore.properties
+*.jks
+*.keystore
+*.p12
+*.pem
+*.key
+
+# Logs and temporary files
+*.log
+*.tmp
+*.temp
