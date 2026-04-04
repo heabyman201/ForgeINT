@@ -765,6 +765,14 @@ class ForgeHardwareViewModel(
         }
     }
 
+    internal suspend fun publishStatsForTest(stats: G14Stats) {
+        publishStats(stats)
+    }
+
+    internal fun setVramPressureStartAtForTest(value: Long?) {
+        vramPressureStartAt = value
+    }
+
     fun setAppForeground(isForeground: Boolean) {
         isAppForeground = isForeground
     }

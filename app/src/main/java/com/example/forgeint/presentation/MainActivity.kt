@@ -78,7 +78,7 @@ fun GeminiApp(viewModel: GeminiViewModel = viewModel(), intent: android.content.
             runCatching { context.unregisterReceiver(receiver) }
         }
     }
-
+    val threshold by settingsManager.isAutoPowerSavingModeThreshold.collectAsStateWithLifecycle(initialValue = 20f)
     LaunchedEffect(
         autoPowerSavingMode,
         batteryPct,
@@ -89,7 +89,7 @@ fun GeminiApp(viewModel: GeminiViewModel = viewModel(), intent: android.content.
     ) {
         if (!autoPowerSavingMode) return@LaunchedEffect
 
-        if (batteryPct in 0..19) {
+        if (batteryPct <= threshold) {
             if (!isAutoPowerSavingActive) {
                 settingsManager.setAutoPowerSavingPreviousTheme(appTheme)
                 settingsManager.setAutoPowerSavingActive(true)
@@ -545,7 +545,12 @@ fun GeminiApp(viewModel: GeminiViewModel = viewModel(), intent: android.content.
             composable("model_select") {
                 val currentModel by viewModel.currentModelId.collectAsStateWithLifecycle()
                 val availableModels by viewModel.availableModels.collectAsStateWithLifecycle()
+                val isFetchingAvailableModels by viewModel.isFetchingAvailableModels.collectAsStateWithLifecycle()
                 val isLocal by viewModel.isLocalEnabled.collectAsStateWithLifecycle()
+
+                LaunchedEffect(isLocal) {
+                    viewModel.fetchAvailableModels()
+                }
 
                 ModelSelectionScreen(
                     selectedModelId = currentModel,
@@ -554,7 +559,8 @@ fun GeminiApp(viewModel: GeminiViewModel = viewModel(), intent: android.content.
                         navController.popBackStack()
                     },
                     availableModels = availableModels,
-                    isLocalEnabled = isLocal
+                    isLocalEnabled = isLocal,
+                    isLoadingModels = isFetchingAvailableModels
                 )
             }
             composable("persona_select") {

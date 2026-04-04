@@ -35,7 +35,7 @@ import androidx.wear.tiles.LayoutElementBuilders.Row
 // ... (Imports remain the same)
 
 class HardwareTileService : TileService() {
-    private val RESOURCES_VERSION = "1"
+    private val RESOURCES_VERSION = "2"
     private val serviceScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
     override fun onTileRequest(requestParams: TileRequest): ListenableFuture<Tile> {
@@ -151,16 +151,25 @@ class HardwareTileService : TileService() {
         statusText: String,
         statusColor: Long
     ): LayoutElementBuilders.LayoutElement {
+        val gpuLabel = stats.dgpuTemp.takeIf { it != "N/A" } ?: "--"
+        val cpuLabel = stats.cpuTemp.takeIf { it != "N/A" } ?: "--"
         return Column.Builder()
             .setWidth(expand())
             .setHeight(expand())
+            .setHorizontalAlignment(LayoutElementBuilders.HORIZONTAL_ALIGN_CENTER)
+            .addContent(Spacer.Builder().setHeight(dp(8f)).build())
             .addContent(
                 Text.Builder()
                     .setText("Server Health")
-                    .setFontStyle(LayoutElementBuilders.FontStyle.Builder().setColor(argb(0xFFAAAAAA.toInt())).setSize(sp(10f)).build())
+                    .setFontStyle(
+                        LayoutElementBuilders.FontStyle.Builder()
+                            .setColor(argb(0xFF9AA4B2.toInt()))
+                            .setSize(sp(10f))
+                            .build()
+                    )
                     .build()
             )
-            .addContent(Spacer.Builder().setHeight(dp(2f)).build())
+            .addContent(Spacer.Builder().setHeight(dp(5f)).build())
             .addContent(
                 Text.Builder()
                     .setText(statusText)
@@ -168,29 +177,73 @@ class HardwareTileService : TileService() {
                         LayoutElementBuilders.FontStyle.Builder()
                             .setColor(argb(statusColor.toInt()))
                             .setWeight(LayoutElementBuilders.FONT_WEIGHT_BOLD)
-                            .setSize(sp(14f))
-                            .build()
-                    )
-                    .build()
-            )
-            .addContent(Spacer.Builder().setHeight(dp(4f)).build())
-            .addContent(
-                Row.Builder()
-                    .addContent(
-                        Text.Builder()
-                            .setText("GPU: ${stats.dgpuTemp}  |  ")
-                            .setFontStyle(LayoutElementBuilders.FontStyle.Builder().setColor(argb(0xFFFFFFFF.toInt())).setSize(sp(12f)).build())
-                            .build()
-                    )
-                    .addContent(
-                        Text.Builder()
-                            .setText("CPU: ${stats.cpuTemp}")
-                            .setFontStyle(LayoutElementBuilders.FontStyle.Builder().setColor(argb(0xFFFFFFFF.toInt())).setSize(sp(12f)).build())
+                            .setSize(sp(15f))
                             .build()
                     )
                     .build()
             )
             .addContent(Spacer.Builder().setHeight(dp(8f)).build())
+            .addContent(
+                Column.Builder()
+                    .setWidth(dp(144f))
+                    .setHeight(dp(54f))
+                    .setHorizontalAlignment(LayoutElementBuilders.HORIZONTAL_ALIGN_CENTER)
+                    .setModifiers(
+                        ModifiersBuilders.Modifiers.Builder()
+                            .setBackground(
+                                ModifiersBuilders.Background.Builder()
+                                    .setColor(argb(0xFF171C25.toInt()))
+                                    .setCorner(
+                                        ModifiersBuilders.Corner.Builder()
+                                            .setRadius(dp(18f))
+                                            .build()
+                                    )
+                                    .build()
+                            )
+                            .build()
+                    )
+                    .addContent(Spacer.Builder().setHeight(dp(8f)).build())
+                    .addContent(
+                        Row.Builder()
+                            .addContent(
+                                Text.Builder()
+                                    .setText("GPU $gpuLabel")
+                                    .setFontStyle(
+                                        LayoutElementBuilders.FontStyle.Builder()
+                                            .setColor(argb(0xFFFFFFFF.toInt()))
+                                            .setSize(sp(12f))
+                                            .build()
+                                    )
+                                    .build()
+                            )
+                            .addContent(Spacer.Builder().setWidth(dp(10f)).build())
+                            .addContent(
+                                Text.Builder()
+                                    .setText("CPU $cpuLabel")
+                                    .setFontStyle(
+                                        LayoutElementBuilders.FontStyle.Builder()
+                                            .setColor(argb(0xFFFFFFFF.toInt()))
+                                            .setSize(sp(12f))
+                                            .build()
+                                    )
+                                    .build()
+                            )
+                            .build()
+                    )
+                    .addContent(
+                        Text.Builder()
+                            .setText("Tap to open monitor")
+                            .setFontStyle(
+                                LayoutElementBuilders.FontStyle.Builder()
+                                    .setColor(argb(0xFF8F9BAA.toInt()))
+                                    .setSize(sp(10f))
+                                    .build()
+                            )
+                            .build()
+                    )
+                    .build()
+            )
+            .addContent(Spacer.Builder().setHeight(dp(10f)).build())
             .addContent(
                 openMonitorButton(context)
             )
@@ -198,9 +251,10 @@ class HardwareTileService : TileService() {
     }
 
     private fun openMonitorButton(context: Context): LayoutElementBuilders.LayoutElement {
-        return LayoutElementBuilders.Box.Builder()
-            .setWidth(dp(100f))
-            .setHeight(dp(32f))
+        return Column.Builder()
+            .setWidth(dp(118f))
+            .setHeight(dp(38f))
+            .setHorizontalAlignment(LayoutElementBuilders.HORIZONTAL_ALIGN_CENTER)
             .setModifiers(
                 ModifiersBuilders.Modifiers.Builder()
                     .setClickable(
@@ -220,16 +274,23 @@ class HardwareTileService : TileService() {
                     )
                     .setBackground(
                         ModifiersBuilders.Background.Builder()
-                            .setColor(argb(0xFF1E222C.toInt()))
-                            .setCorner(ModifiersBuilders.Corner.Builder().setRadius(dp(16f)).build())
+                            .setColor(argb(0xFFDCB17E.toInt()))
+                            .setCorner(ModifiersBuilders.Corner.Builder().setRadius(dp(19f)).build())
                             .build()
                     )
                     .build()
             )
+            .addContent(Spacer.Builder().setHeight(dp(10f)).build())
             .addContent(
                 Text.Builder()
                     .setText("Monitor")
-                    .setFontStyle(LayoutElementBuilders.FontStyle.Builder().setColor(argb(0xFFDCB17E.toInt())).setSize(sp(12f)).build())
+                    .setFontStyle(
+                        LayoutElementBuilders.FontStyle.Builder()
+                            .setColor(argb(0xFF17120A.toInt()))
+                            .setSize(sp(12f))
+                            .setWeight(LayoutElementBuilders.FONT_WEIGHT_BOLD)
+                            .build()
+                    )
                     .build()
             )
             .build()

@@ -3,6 +3,7 @@ package com.example.weargemini.data
 import android.content.Context
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.floatPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import kotlinx.coroutines.flow.Flow
@@ -43,9 +44,11 @@ class SettingsManager(private val context: Context) {
     private val APP_THEME_KEY = stringPreferencesKey("app_theme")
     private val VOICE_DOMINANT_MODE_KEY = booleanPreferencesKey("voice_dominant_mode")
     private val AUTO_POWER_SAVING_MODE_KEY = booleanPreferencesKey("auto_power_saving_mode")
-    private val AUTO_POWER_SAVING_PREVIOUS_THEME_KEY = stringPreferencesKey("auto_power_saving_previous_theme")
+    private val AUTO_POWER_SAVING_PREVIOUS_THEME_KEY =
+        stringPreferencesKey("auto_power_saving_previous_theme")
     private val AUTO_POWER_SAVING_ACTIVE_KEY = booleanPreferencesKey("auto_power_saving_active")
-
+    private val AUTO_POWER_SAVING_MODE_THRESHOLD_KEY =
+        floatPreferencesKey("auto_power_saving_mode_threshold")
     // --- Flows ---
 
     val isVoiceDominantMode: Flow<Boolean> = context.dataStore.data
@@ -56,6 +59,9 @@ class SettingsManager(private val context: Context) {
 
     val autoPowerSavingPreviousTheme: Flow<String> = context.dataStore.data
         .map { it[AUTO_POWER_SAVING_PREVIOUS_THEME_KEY] ?: "" }
+
+    val isAutoPowerSavingModeThreshold: Flow<Float> = context.dataStore.data
+        .map { it[AUTO_POWER_SAVING_MODE_THRESHOLD_KEY] ?: 0f }
 
     val isAutoPowerSavingActive: Flow<Boolean> = context.dataStore.data
         .map { it[AUTO_POWER_SAVING_ACTIVE_KEY] ?: false }
@@ -72,10 +78,10 @@ class SettingsManager(private val context: Context) {
     val isMemoryMonitorEnabled: Flow<Boolean> = context.dataStore.data
         .map { it[MEMORY_MONITOR] ?: false }
 
-val isSystemTelemetryEnabled: Flow<Boolean> = context.dataStore.data
-    .map {
-        it[SYSTEM_TELEMETRY] ?: false
-    }
+    val isSystemTelemetryEnabled: Flow<Boolean> = context.dataStore.data
+        .map {
+            it[SYSTEM_TELEMETRY] ?: false
+        }
 
     val isLocalEnabled: Flow<Boolean> = context.dataStore.data
         .map { it[IS_LOCAL_ENABLED_KEY] ?: false }
@@ -127,68 +133,74 @@ val isSystemTelemetryEnabled: Flow<Boolean> = context.dataStore.data
         context.dataStore.edit { it[MODEL_ID_KEY] = modelId }
     }
 
-    suspend fun setLocalEnabled(enabled: Boolean) {
-        context.dataStore.edit { it[IS_LOCAL_ENABLED_KEY] = enabled }
+    suspend fun setAutoPowerSavingModeThreshold(threshold: Float) {
+        context.dataStore.edit { it[AUTO_POWER_SAVING_MODE_THRESHOLD_KEY] = threshold }
     }
-suspend fun setMemoryMonitorEnabled(enabled: Boolean) {
-    context.dataStore.edit {
-        it[MEMORY_MONITOR] = enabled
-    }
-}
-    suspend fun setSystemTelemetryEnabled(enabled: Boolean) {
-        context.dataStore.edit { it[SYSTEM_TELEMETRY] = enabled }
-    }
-    suspend fun setHostIp(ip: String) {
-        context.dataStore.edit { it[HOST_IP_KEY] = ip }
-    }
-
-    // New Setter for Port
-    suspend fun setServerPort(port: String) {
-        context.dataStore.edit { it[SERVER_PORT_KEY] = port }
-    }
-
-    suspend fun setHardwareHostIp(ip: String) {
-        context.dataStore.edit { it[HARDWARE_HOST_IP_KEY] = ip }
-    }
-
-    suspend fun setHardwarePort(port: String) {
-        context.dataStore.edit { it[HARDWARE_PORT_KEY] = port }
-    }
-
-    suspend fun setRemoteHostIp(ip: String) {
-        context.dataStore.edit { it[REMOTE_HOST_IP_KEY] = ip }
-    }
-
-    suspend fun setRemotePort(port: String) {
-        context.dataStore.edit { it[REMOTE_PORT_KEY] = port }
-    }
-
-    suspend fun setFunnelEnabled(enabled: Boolean) {
-        context.dataStore.edit { it[IS_FUNNEL_ENABLED_KEY] = enabled }
-    }
-
-    suspend fun setLocalAuthToken(token: String) {
-        val normalized = token.trim().ifBlank { DEFAULT_LOCAL_AUTH_TOKEN }
-        context.dataStore.edit { it[LOCAL_AUTH_TOKEN_KEY] = normalized }
-    }
-
-    suspend fun setSelectedPersona(personaId: String) {
-        context.dataStore.edit { preferences ->
-            preferences[SELECTED_PERSONA_KEY] = personaId
+        suspend fun setLocalEnabled(enabled: Boolean) {
+            context.dataStore.edit { it[IS_LOCAL_ENABLED_KEY] = enabled }
         }
-    }
 
-    suspend fun setMessageLength(length: String) {
-        context.dataStore.edit { it[MESSAGE_LENGTH_KEY] = length }
-    }
+        suspend fun setMemoryMonitorEnabled(enabled: Boolean) {
+            context.dataStore.edit {
+                it[MEMORY_MONITOR] = enabled
+            }
+        }
 
-    suspend fun setApiKey(apiKey: String) {
-        context.dataStore.edit { it[API_KEY_KEY] = apiKey }
-    }
+        suspend fun setSystemTelemetryEnabled(enabled: Boolean) {
+            context.dataStore.edit { it[SYSTEM_TELEMETRY] = enabled }
+        }
 
-    suspend fun setCustomApiKeyEnabled(enabled: Boolean) {
-        context.dataStore.edit { it[IS_CUSTOM_API_KEY_ENABLED_KEY] = enabled }
-    }
+        suspend fun setHostIp(ip: String) {
+            context.dataStore.edit { it[HOST_IP_KEY] = ip }
+        }
+
+        // New Setter for Port
+        suspend fun setServerPort(port: String) {
+            context.dataStore.edit { it[SERVER_PORT_KEY] = port }
+        }
+
+        suspend fun setHardwareHostIp(ip: String) {
+            context.dataStore.edit { it[HARDWARE_HOST_IP_KEY] = ip }
+        }
+
+        suspend fun setHardwarePort(port: String) {
+            context.dataStore.edit { it[HARDWARE_PORT_KEY] = port }
+        }
+
+        suspend fun setRemoteHostIp(ip: String) {
+            context.dataStore.edit { it[REMOTE_HOST_IP_KEY] = ip }
+        }
+
+        suspend fun setRemotePort(port: String) {
+            context.dataStore.edit { it[REMOTE_PORT_KEY] = port }
+        }
+
+        suspend fun setFunnelEnabled(enabled: Boolean) {
+            context.dataStore.edit { it[IS_FUNNEL_ENABLED_KEY] = enabled }
+        }
+
+        suspend fun setLocalAuthToken(token: String) {
+            val normalized = token.trim().ifBlank { DEFAULT_LOCAL_AUTH_TOKEN }
+            context.dataStore.edit { it[LOCAL_AUTH_TOKEN_KEY] = normalized }
+        }
+
+        suspend fun setSelectedPersona(personaId: String) {
+            context.dataStore.edit { preferences ->
+                preferences[SELECTED_PERSONA_KEY] = personaId
+            }
+        }
+
+        suspend fun setMessageLength(length: String) {
+            context.dataStore.edit { it[MESSAGE_LENGTH_KEY] = length }
+        }
+
+        suspend fun setApiKey(apiKey: String) {
+            context.dataStore.edit { it[API_KEY_KEY] = apiKey }
+        }
+
+        suspend fun setCustomApiKeyEnabled(enabled: Boolean) {
+            context.dataStore.edit { it[IS_CUSTOM_API_KEY_ENABLED_KEY] = enabled }
+        }
 
         suspend fun setAppTheme(theme: String) {
 
@@ -196,7 +208,6 @@ suspend fun setMemoryMonitorEnabled(enabled: Boolean) {
 
         }
 
-    
 
         suspend fun setVoiceDominantMode(enabled: Boolean) {
 
@@ -220,6 +231,9 @@ suspend fun setMemoryMonitorEnabled(enabled: Boolean) {
             context.dataStore.edit { it[AUTO_POWER_SAVING_ACTIVE_KEY] = enabled }
         }
 
+
+
     }
+
 
     

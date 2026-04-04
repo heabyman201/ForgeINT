@@ -16,40 +16,27 @@ inline bool isAsciiWhitespace(char c) {
     return c == ' ' || c == '\t' || c == '\n' || c == '\r';
 }
 
-size_t countCommaSeparatedFloats(const char* text) {
-    if (text == nullptr) return 0;
+size_t estimateCommaSeparatedFloatCapacity(const char* text) {
+    if (text == nullptr || *text == '\0') return 0;
 
-    const char* p = text;
-    size_t count = 0;
-    while (*p != '\0') {
-        while (isAsciiWhitespace(*p) || *p == ',') {
-            ++p;
-        }
-        if (*p == '\0') break;
-
-        char* endPtr = nullptr;
-        std::strtof(p, &endPtr);
-        if (endPtr == p) {
-            while (*p != '\0' && *p != ',') ++p;
-            continue;
-        }
-        ++count;
-        p = endPtr;
-        while (*p != '\0' && *p != ',') {
-            if (!isAsciiWhitespace(*p)) break;
-            ++p;
-        }
-        if (*p == ',') ++p;
+    size_t commas = 0;
+    for (const char* p = text; *p != '\0'; ++p) {
+        commas += (*p == ',') ? 1u : 0u;
     }
-    return count;
+    return commas + 1u;
 }
 
-size_t parseCommaSeparatedFloatsToBuffer(const char* text, float* out, size_t capacity) {
-    if (text == nullptr || out == nullptr || capacity == 0) return 0;
+size_t parseCommaSeparatedFloatsToVector(const char* text, std::vector<float>& out) {
+    out.clear();
+    if (text == nullptr) return 0;
+
+    const size_t reserveCount = estimateCommaSeparatedFloatCapacity(text);
+    if (reserveCount > out.capacity()) {
+        out.reserve(reserveCount);
+    }
 
     const char* p = text;
-    size_t count = 0;
-    while (*p != '\0' && count < capacity) {
+    while (*p != '\0') {
         while (isAsciiWhitespace(*p) || *p == ',') {
             ++p;
         }
@@ -61,7 +48,7 @@ size_t parseCommaSeparatedFloatsToBuffer(const char* text, float* out, size_t ca
             while (*p != '\0' && *p != ',') ++p;
             continue;
         }
-        out[count++] = value;
+        out.push_back(value);
         p = endPtr;
         while (*p != '\0' && *p != ',') {
             if (!isAsciiWhitespace(*p)) break;
@@ -69,7 +56,7 @@ size_t parseCommaSeparatedFloatsToBuffer(const char* text, float* out, size_t ca
         }
         if (*p == ',') ++p;
     }
-    return count;
+    return out.size();
 }
 
 void normalizeInPlace(float* vec, size_t len) {
@@ -84,6 +71,17 @@ void normalizeInPlace(float* vec, size_t len) {
     for (size_t i = 0; i < len; ++i) {
         vec[i] *= inv;
     }
+}
+
+double squaredNorm(const float* vec, size_t len) {
+    if (vec == nullptr || len == 0) return 0.0;
+
+    double normSq = 0.0;
+    for (size_t i = 0; i < len; ++i) {
+        const double value = vec[i];
+        normSq += value * value;
+    }
+    return normSq;
 }
 
 double cosineSimilaritySlices(const float* a, size_t aLen, const float* b, size_t bLen) {
@@ -105,13 +103,18 @@ double cosineSimilaritySlices(const float* a, size_t aLen, const float* b, size_
     return std::clamp(score, 0.0f, 1.0f);
 }
 
-double cosineSimilarityFloatBytesLE(const float* a, size_t aLen, const uint8_t* bytes, size_t floatCount) {
+double cosineSimilarityFloatBytesLE(
+        const float* a,
+        size_t aLen,
+        double normASq,
+        const uint8_t* bytes,
+        size_t floatCount) {
     const size_t size = std::min(aLen, floatCount);
     if (size == 0 || bytes == nullptr) return 0.0;
+    if (normASq <= kCosineNormEpsilon) return 0.0;
 
-    float dot = 0.0f;
-    float normA = 0.0f;
-    float normB = 0.0f;
+    double dot = 0.0;
+    double normB = 0.0;
     for (size_t i = 0; i < size; ++i) {
         const size_t base = i * 4u;
         const uint32_t bits =
@@ -122,13 +125,12 @@ double cosineSimilarityFloatBytesLE(const float* a, size_t aLen, const uint8_t* 
         float vb = 0.0f;
         std::memcpy(&vb, &bits, sizeof(float));
         const float va = a[i];
-        dot += va * vb;
-        normA += va * va;
-        normB += vb * vb;
+        dot += static_cast<double>(va) * static_cast<double>(vb);
+        normB += static_cast<double>(vb) * static_cast<double>(vb);
     }
-    if (normA <= kCosineNormEpsilon || normB <= kCosineNormEpsilon) return 0.0;
-    const float score = dot / (std::sqrt(normA) * std::sqrt(normB));
-    return std::clamp(score, 0.0f, 1.0f);
+    if (normB <= kCosineNormEpsilon) return 0.0;
+    const double score = dot / (std::sqrt(normASq) * std::sqrt(normB));
+    return std::clamp(score, 0.0, 1.0);
 }
 
 inline bool isTokenChar(unsigned char c) {
@@ -136,6 +138,16 @@ inline bool isTokenChar(unsigned char c) {
             (c >= 'A' && c <= 'Z') ||
             (c >= '0' && c <= '9') ||
             c == '\'');
+}
+
+std::vector<float>& floatScratchBuffer() {
+    thread_local std::vector<float> scratch;
+    return scratch;
+}
+
+std::vector<jdouble>& doubleScratchBuffer() {
+    thread_local std::vector<jdouble> scratch;
+    return scratch;
 }
 
 } // namespace
@@ -287,24 +299,15 @@ Java_com_example_forgeint_presentation_GeminiViewModel_decodeVectorNative(
     const char* utfChars = env->GetStringUTFChars(encoded, nullptr);
     if (utfChars == nullptr) return env->NewFloatArray(0);
 
-    const size_t valueCount = countCommaSeparatedFloats(utfChars);
+    auto& values = floatScratchBuffer();
+    const size_t valueCount = parseCommaSeparatedFloatsToVector(utfChars, values);
     env->ReleaseStringUTFChars(encoded, utfChars);
 
     jfloatArray out = env->NewFloatArray(static_cast<jsize>(valueCount));
     if (out == nullptr) return nullptr;
     if (valueCount == 0) return out;
 
-    jfloat* outPtr = env->GetFloatArrayElements(out, nullptr);
-    if (outPtr == nullptr) return out;
-
-    utfChars = env->GetStringUTFChars(encoded, nullptr);
-    if (utfChars == nullptr) {
-        env->ReleaseFloatArrayElements(out, outPtr, 0);
-        return out;
-    }
-    parseCommaSeparatedFloatsToBuffer(utfChars, outPtr, valueCount);
-    env->ReleaseStringUTFChars(encoded, utfChars);
-    env->ReleaseFloatArrayElements(out, outPtr, 0);
+    env->SetFloatArrayRegion(out, 0, static_cast<jsize>(valueCount), values.data());
     return out;
 }
 
@@ -319,11 +322,14 @@ Java_com_example_forgeint_presentation_GeminiViewModel_normalizeVectorNative(
     if (out == nullptr) return nullptr;
     if (len <= 0) return out;
 
-    jfloat* outPtr = env->GetFloatArrayElements(out, nullptr);
-    if (outPtr == nullptr) return out;
-    env->GetFloatArrayRegion(raw, 0, len, outPtr);
-    normalizeInPlace(outPtr, static_cast<size_t>(len));
-    env->ReleaseFloatArrayElements(out, outPtr, 0);
+    auto& scratch = floatScratchBuffer();
+    const size_t size = static_cast<size_t>(len);
+    if (scratch.size() < size) {
+        scratch.resize(size);
+    }
+    env->GetFloatArrayRegion(raw, 0, len, scratch.data());
+    normalizeInPlace(scratch.data(), size);
+    env->SetFloatArrayRegion(out, 0, len, scratch.data());
     return out;
 }
 
@@ -339,21 +345,21 @@ Java_com_example_forgeint_presentation_GeminiViewModel_cosineSimilarityNative(
     const jsize size = std::min(lenA, lenB);
     if (size <= 0) return 0.0;
 
-    auto* va = env->GetFloatArrayElements(a, nullptr);
-    if (va == nullptr) return 0.0;
-    auto* vb = env->GetFloatArrayElements(b, nullptr);
-    if (vb == nullptr) {
-        env->ReleaseFloatArrayElements(a, va, JNI_ABORT);
-        return 0.0;
+    auto& scratch = floatScratchBuffer();
+    const size_t totalSize = static_cast<size_t>(size) * 2u;
+    if (scratch.size() < totalSize) {
+        scratch.resize(totalSize);
     }
+    float* va = scratch.data();
+    float* vb = scratch.data() + size;
+    env->GetFloatArrayRegion(a, 0, size, va);
+    env->GetFloatArrayRegion(b, 0, size, vb);
 
     const double score = cosineSimilaritySlices(
             va,
             static_cast<size_t>(size),
             vb,
             static_cast<size_t>(size));
-    env->ReleaseFloatArrayElements(b, vb, JNI_ABORT);
-    env->ReleaseFloatArrayElements(a, va, JNI_ABORT);
     return score;
 }
 
@@ -365,51 +371,60 @@ Java_com_example_forgeint_presentation_GeminiViewModel_fallbackHashEmbeddingNati
         jint dim) {
     if (dim <= 0) return env->NewFloatArray(0);
 
-    std::vector<float> vec(static_cast<size_t>(dim), 0.0f);
+    jfloatArray out = env->NewFloatArray(dim);
+    if (out == nullptr) return nullptr;
+    if (text == nullptr) return out;
 
-    if (text != nullptr) {
-        const char* utfChars = env->GetStringUTFChars(text, nullptr);
-        if (utfChars != nullptr) {
-            size_t tokenIndex = 0;
+    auto& vec = floatScratchBuffer();
+    const size_t size = static_cast<size_t>(dim);
+    if (vec.size() < size) {
+        vec.resize(size);
+    }
+    std::fill_n(vec.data(), size, 0.0f);
 
-            auto processTokenHash = [&](uint32_t hash) {
-                const int32_t signedHash = static_cast<int32_t>(hash);
-                const int64_t absHash = (signedHash == std::numeric_limits<int32_t>::min())
-                                        ? static_cast<int64_t>(std::numeric_limits<int32_t>::max()) + 1
-                                        : std::llabs(static_cast<long long>(signedHash));
-                const int idx = static_cast<int>(absHash % dim);
-                const float sign = (((hash >> 1u) & 1u) == 0u) ? 1.0f : -1.0f;
-                const float weight = 1.0f + static_cast<float>(tokenIndex % 3u) * 0.1f;
-                vec[static_cast<size_t>(idx)] += sign * weight;
-                ++tokenIndex;
-            };
+    const char* utfChars = env->GetStringUTFChars(text, nullptr);
+    if (utfChars != nullptr) {
+        size_t tokenIndex = 0;
 
-            const unsigned char* p = reinterpret_cast<const unsigned char*>(utfChars);
-            uint32_t tokenHash = 0u;
-            bool hasToken = false;
-            while (*p != '\0') {
-                unsigned char c = *p++;
-                if (isTokenChar(c)) {
-                    if (c >= 'A' && c <= 'Z') c = static_cast<unsigned char>(c - 'A' + 'a');
-                    tokenHash = (tokenHash * 31u) + static_cast<uint8_t>(c);
-                    hasToken = true;
-                } else if (hasToken) {
-                    processTokenHash(tokenHash);
-                    tokenHash = 0u;
-                    hasToken = false;
-                }
-            }
-            if (hasToken) {
+        auto processTokenHash = [&](uint32_t hash) {
+            const int32_t signedHash = static_cast<int32_t>(hash);
+            const int64_t absHash = (signedHash == std::numeric_limits<int32_t>::min())
+                                    ? static_cast<int64_t>(std::numeric_limits<int32_t>::max()) + 1
+                                    : std::llabs(static_cast<long long>(signedHash));
+            const int idx = static_cast<int>(absHash % dim);
+            const float sign = (((hash >> 1u) & 1u) == 0u) ? 1.0f : -1.0f;
+            const float weight = 1.0f + static_cast<float>(tokenIndex % 3u) * 0.1f;
+            vec[static_cast<size_t>(idx)] += sign * weight;
+            ++tokenIndex;
+        };
+
+        const unsigned char* p = reinterpret_cast<const unsigned char*>(utfChars);
+        uint32_t tokenHash = 0u;
+        bool hasToken = false;
+        while (*p != '\0') {
+            unsigned char c = *p++;
+            if (isTokenChar(c)) {
+                if (c >= 'A' && c <= 'Z') c = static_cast<unsigned char>(c - 'A' + 'a');
+                tokenHash = (tokenHash * 31u) + static_cast<uint8_t>(c);
+                hasToken = true;
+            } else if (hasToken) {
                 processTokenHash(tokenHash);
+                tokenHash = 0u;
+                hasToken = false;
             }
+        }
+        if (hasToken) {
+            processTokenHash(tokenHash);
+        }
 
-            env->ReleaseStringUTFChars(text, utfChars);
+        env->ReleaseStringUTFChars(text, utfChars);
+
+        if (tokenIndex == 0) {
+            return out;
         }
     }
 
-    normalizeInPlace(vec.data(), static_cast<size_t>(dim));
-    jfloatArray out = env->NewFloatArray(dim);
-    if (out == nullptr) return nullptr;
+    normalizeInPlace(vec.data(), size);
     env->SetFloatArrayRegion(out, 0, dim, vec.data());
     return out;
 }
@@ -430,10 +445,24 @@ Java_com_example_forgeint_presentation_GeminiViewModel_scoreMessageVectorsNative
     if (out == nullptr) return nullptr;
     if (queryLen <= 0 || itemCount <= 0) return out;
 
-    auto* query = env->GetFloatArrayElements(queryVector, nullptr);
-    if (query == nullptr) return out;
+    auto& queryScratch = floatScratchBuffer();
+    const size_t querySize = static_cast<size_t>(queryLen);
+    if (queryScratch.size() < querySize) {
+        queryScratch.resize(querySize);
+    }
+    env->GetFloatArrayRegion(queryVector, 0, queryLen, queryScratch.data());
 
-    std::vector<jdouble> scores(static_cast<size_t>(itemCount), 0.0);
+    const double queryNormSq = squaredNorm(queryScratch.data(), querySize);
+    if (queryNormSq <= kCosineNormEpsilon) {
+        return out;
+    }
+
+    auto& scores = doubleScratchBuffer();
+    const size_t scoreCount = static_cast<size_t>(itemCount);
+    if (scores.size() < scoreCount) {
+        scores.resize(scoreCount);
+    }
+    std::fill_n(scores.data(), scoreCount, 0.0);
     for (jsize i = 0; i < itemCount; ++i) {
         auto* blob = static_cast<jbyteArray>(env->GetObjectArrayElement(vectorBlobs, i));
         if (blob == nullptr) continue;
@@ -444,8 +473,9 @@ Java_com_example_forgeint_presentation_GeminiViewModel_scoreMessageVectorsNative
             auto* bytes = static_cast<const jbyte*>(env->GetPrimitiveArrayCritical(blob, nullptr));
             if (bytes != nullptr) {
                 scores[static_cast<size_t>(i)] = cosineSimilarityFloatBytesLE(
-                        query,
-                        static_cast<size_t>(queryLen),
+                        queryScratch.data(),
+                        querySize,
+                        queryNormSq,
                         reinterpret_cast<const uint8_t*>(bytes),
                         static_cast<size_t>(floatCount));
                 env->ReleasePrimitiveArrayCritical(blob, const_cast<jbyte*>(bytes), JNI_ABORT);
@@ -454,7 +484,6 @@ Java_com_example_forgeint_presentation_GeminiViewModel_scoreMessageVectorsNative
         env->DeleteLocalRef(blob);
     }
 
-    env->ReleaseFloatArrayElements(queryVector, query, JNI_ABORT);
     env->SetDoubleArrayRegion(out, 0, itemCount, scores.data());
     return out;
 }

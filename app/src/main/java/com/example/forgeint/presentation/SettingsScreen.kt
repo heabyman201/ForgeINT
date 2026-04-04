@@ -11,10 +11,12 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AccountTree
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.BroadcastOnPersonal
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.DeviceThermostat
 import androidx.compose.material.icons.filled.ShowChart
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.SaveAlt
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.WifiFind
 import androidx.compose.runtime.rememberCoroutineScope
@@ -63,6 +65,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.wear.compose.material.CompactChip
 import androidx.compose.foundation.border
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -73,6 +76,8 @@ import com.example.forgeint.presentation.theme.LocalForgeIntColors
 import androidx.compose.ui.input.rotary.onRotaryScrollEvent
 import kotlinx.coroutines.launch
 import androidx.compose.foundation.gestures.scrollBy
+import androidx.wear.compose.material3.Slider
+import androidx.wear.compose.material3.SliderDefaults
 import androidx.wear.compose.material.items as materialItems
 
 fun formatModelDisplayName(modelId: String): String {
@@ -152,7 +157,7 @@ fun SettingsScreen(
     }
 
     val focusRequester = remember { FocusRequester() }
-
+    val autoPowerThreshold by settingsManager.isAutoPowerSavingModeThreshold.collectAsStateWithLifecycle(initialValue = 20f)
     LaunchedEffect(Unit) {
         focusRequester.requestFocus()
     }
@@ -196,9 +201,11 @@ fun SettingsScreen(
 
                     )
                 )
+
             }
 
             item {
+
                 ToggleChip(
                     checked = isAutoPowerSavingMode,
                     onCheckedChange = { enabled ->
@@ -210,7 +217,7 @@ fun SettingsScreen(
                     secondaryLabel = {
                         Text(
                             if (isAutoPowerSavingMode) {
-                                "Below 20%: enable power saving + OLED"
+                                "Below $autoPowerThreshold%: enable power saving + OLED"
                             } else {
                                 "Trigger battery saver automatically"
                             }
@@ -227,8 +234,29 @@ fun SettingsScreen(
                         uncheckedEndBackgroundColor = colors.surface
                     )
                 )
-            }
 
+            }
+            item {
+                Slider(
+                    value = autoPowerThreshold,
+                    onValueChange = { newValue ->
+                        coroutineScope.launch {
+                            settingsManager.setAutoPowerSavingModeThreshold(newValue)
+                        }
+                    },
+                    steps = 9,
+                    valueRange = 0f..100f,
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = SliderDefaults.sliderColors(
+                        selectedBarColor =  Color(0xFF0060FF),
+                        unselectedBarColor = Color(0xFF000000),
+                        selectedBarSeparatorColor = colors.surface
+
+
+
+                    )
+                )
+            }
             // Voice-Dominant Mode Toggle
             item {
                 ToggleChip(
@@ -691,13 +719,15 @@ fun ApiKeySettingsScreen(
 fun ModelSelectionScreen(
     selectedModelId: String,
     onModelSelected: (String) -> Unit,
-    availableModels: List<String> = emptyList(),
-    isLocalEnabled: Boolean = false
+    availableModels: List<AvailableModelOption> = emptyList(),
+    isLocalEnabled: Boolean = false,
+    isLoadingModels: Boolean = false
 ) {
     val listState = rememberTransformingLazyColumnState()
     val coroutineScope = rememberCoroutineScope()
     val focusRequester = remember { FocusRequester() }
     var selectedCompany by remember { mutableStateOf("All") }
+    var searchQuery by remember { mutableStateOf("") }
     val companies = remember {
         listOf(
             "All", "Google", "Meta", "Alibaba", "OpenAI",
@@ -705,56 +735,40 @@ fun ModelSelectionScreen(
         )
     }
 
-    val defaultModels = remember {
-        listOf(
-            AiModel(SettingsManager.DEFAULT_CLOUD_MODEL_ID, "Gemma 3N E4B", "Multimodal: Video, Audio & Mobile efficiency"),
-            AiModel("openrouter/free", "Auto", "Chooses a random available model"),
-            AiModel("minimax/minimax-m2.5:free", "Minimax 2.5", "MiniMax-M2.5 is a SOTA large language model designed for real-world productivity."),
-            AiModel("qwen/qwen3-4b:free", "Qwen 4B", "High-speed reasoning & Multilingual coding"),
-            AiModel("z-ai/glm-4.5-air:free", "GLM 4.5", "Agentic workflows & Native tool-calling"),
-            AiModel("meta-llama/llama-3.1-405b-instruct:free", "Llama 3.1 405B", "Frontier-level intelligence & massive scale reasoning"),
-            AiModel("meta-llama/llama-3.3-70b-instruct:free", "Llama 3.3 70B", "Complex instruction following & Reasoning"),
-            AiModel("google/gemma-3-27b-it:free", "Gemma 3 27B", "Dense Vision-Language & Deep logic"),
-            AiModel("google/gemma-2-9b-it:free", "Gemma 2.9B", "Balanced performance for general tasks"),
-            AiModel("google/gemma-3n-e2b-it:free", "Gemma 3N E2B", "Ultra-lightweight multimodal for edge devices"),
-            AiModel("openai/gpt-oss-120b:free", "GPT OSS 120B", "Frontier reasoning & Advanced web browsing"),
-            AiModel("openai/gpt-oss-20b:free", "GPT OSS 20B", "Fast local reasoning & STEM specialist"),
-            AiModel("cognitivecomputations/dolphin-mistral-24b-venice-edition:free", "Dolphin Mistral 24B", "Uncensored roleplay & Multi-turn logic"),
-            AiModel("tngtech/deepseek-r1t2-chimera:free", "Deepseek Chimera", "Reasoning-focused merge: Advanced logic, coding & creative roleplay"),
-            AiModel("nvidia/llama-3.1-nemotron-70b-instruct:free", "Nemotron 70B", "Extremely helpful response style & high-quality formatting"),
-        )
-    }
-
     val activeModels = remember(availableModels, isLocalEnabled) {
         if (isLocalEnabled) {
-            if (availableModels.isNotEmpty()) {
-                availableModels.map { id ->
-                    AiModel(id, id.replace("-", " ").uppercase(), "Local Server Model")
-                }
-            } else {
-                emptyList()
+            availableModels.map { model ->
+                AiModel(model.id, model.name, model.description)
             }
         } else {
-            defaultModels
+            availableModels.map { model ->
+                AiModel(model.id, model.name, model.description)
+            }
         }
     }
     val colors = LocalForgeIntColors.current
-    val filteredModels = remember(selectedCompany, activeModels) {
-        if (selectedCompany == "All") activeModels
-        else activeModels.filter { model ->
-            when (selectedCompany) {
-                "Google" -> model.id.startsWith("google")
-                "Meta" -> model.id.startsWith("meta")
-                "Alibaba" -> model.id.startsWith("qwen")
-                "OpenAI" -> model.id.startsWith("openai")
-                "Z-AI" -> model.id.startsWith("z-ai")
-                "Mistral" -> model.id.contains("mistral")
-                "Deepseek" -> model.id.startsWith("tngtech")
-                "Nvidia" -> model.id.startsWith("nvidia")
-                "Local" -> true
-                else -> true
+    val filteredModels = remember(selectedCompany, activeModels, searchQuery) {
+        activeModels
+            .filter { model ->
+                selectedCompany == "All" || when (selectedCompany) {
+                    "Google" -> model.id.startsWith("google")
+                    "Meta" -> model.id.startsWith("meta")
+                    "Alibaba" -> model.id.startsWith("qwen")
+                    "OpenAI" -> model.id.startsWith("openai")
+                    "Z-AI" -> model.id.startsWith("z-ai")
+                    "Mistral" -> model.id.contains("mistral")
+                    "Deepseek" -> model.id.startsWith("tngtech")
+                    "Nvidia" -> model.id.startsWith("nvidia")
+                    "Local" -> true
+                    else -> true
+                }
             }
-        }
+            .filter { model ->
+                searchQuery.isBlank() ||
+                    model.name.contains(searchQuery, ignoreCase = true) ||
+                    model.id.contains(searchQuery, ignoreCase = true) ||
+                    model.specialty.contains(searchQuery, ignoreCase = true)
+            }
     }
 
     LaunchedEffect(Unit) {
@@ -787,6 +801,51 @@ fun ModelSelectionScreen(
                     style = MaterialTheme.typography.caption1,
                     color = Color.Gray
                 )
+            }
+
+            item {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(colors.surface, RoundedCornerShape(20.dp))
+                        .border(1.dp, colors.primary.copy(alpha = 0.28f), RoundedCornerShape(20.dp))
+                        .padding(horizontal = 12.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Search,
+                        contentDescription = "Search models",
+                        tint = colors.primary
+                    )
+                    BasicTextField(
+                        value = searchQuery,
+                        onValueChange = { searchQuery = it },
+                        singleLine = true,
+                        textStyle = MaterialTheme.typography.body2.copy(color = Color.White),
+                        modifier = Modifier
+                            .weight(1f)
+                            .padding(horizontal = 8.dp),
+                        decorationBox = { innerTextField ->
+                            if (searchQuery.isBlank()) {
+                                Text(
+                                    text = if (isLocalEnabled) "Search local models" else "Search free OpenRouter models",
+                                    color = Color.Gray,
+                                    style = MaterialTheme.typography.body2
+                                )
+                            }
+                            innerTextField()
+                        }
+                    )
+                    if (searchQuery.isNotBlank()) {
+                        Chip(
+                            onClick = { searchQuery = "" },
+                            label = { Text("Clear") },
+                            icon = { Icon(Icons.Default.Close, contentDescription = "Clear search") },
+                            colors = ChipDefaults.secondaryChipColors(),
+                            modifier = Modifier.height(34.dp)
+                        )
+                    }
+                }
             }
 
             if (!isLocalEnabled) {
@@ -835,10 +894,40 @@ fun ModelSelectionScreen(
                 }
             }
 
-            if (activeModels.isEmpty() && isLocalEnabled) {
+            if (isLoadingModels) {
                 item {
                     Text(
-                        "No models found.\nCheck connection settings.",
+                        if (isLocalEnabled) "Loading local models..." else "Fetching free OpenRouter models...",
+                        style = MaterialTheme.typography.body2,
+                        textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                        modifier = Modifier.padding(10.dp)
+                    )
+                }
+            }
+
+            if (activeModels.isEmpty() && !isLoadingModels) {
+                item {
+                    Text(
+                        if (isLocalEnabled) {
+                            "No models found.\nCheck connection settings."
+                        } else {
+                            "No free OpenRouter models found."
+                        },
+                        style = MaterialTheme.typography.body2,
+                        textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                        modifier = Modifier.padding(10.dp)
+                    )
+                }
+            }
+
+            if (filteredModels.isEmpty() && activeModels.isNotEmpty()) {
+                item {
+                    Text(
+                        if (searchQuery.isBlank()) {
+                            "No models match the selected filter."
+                        } else {
+                            "No models match \"$searchQuery\"."
+                        },
                         style = MaterialTheme.typography.body2,
                         textAlign = androidx.compose.ui.text.style.TextAlign.Center,
                         modifier = Modifier.padding(10.dp)

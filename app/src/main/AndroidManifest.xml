@@ -60,6 +60,20 @@
         </service>
 
         <service
+            android:name=".presentation.VoiceChatTileService"
+            android:label="Voice Chat"
+            android:permission="com.google.android.wearable.permission.BIND_TILE_PROVIDER"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="androidx.wear.tiles.action.BIND_TILE_PROVIDER" />
+            </intent-filter>
+
+            <meta-data
+                android:name="androidx.wear.tiles.preview"
+                android:resource="@mipmap/ic_launcher" />
+        </service>
+
+        <service
             android:name=".presentation.HardwareTileService"
             android:label="Server Health"
             android:permission="com.google.android.wearable.permission.BIND_TILE_PROVIDER"

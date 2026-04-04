@@ -27,11 +27,9 @@ import retrofit2.http.POST
 import retrofit2.http.Streaming
 import retrofit2.http.Url
 import java.io.IOException
-import java.net.URLEncoder
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.MediaType.Companion.toMediaType
-import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.ResponseBody
 import okhttp3.ResponseBody.Companion.asResponseBody
 import java.nio.ByteBuffer
@@ -287,6 +285,8 @@ class GeminiViewModel(application: Application) : AndroidViewModel(application) 
 
     val localAuthToken = settingsManager.localAuthToken
         .stateIn(viewModelScope, SharingStarted.Eagerly, SettingsManager.DEFAULT_LOCAL_AUTH_TOKEN)
+val autoPowerSavingThreshold = settingsManager.isAutoPowerSavingModeThreshold
+        .stateIn(viewModelScope, SharingStarted.Eagerly, 0.0)
 
     val isLocalEnabled = settingsManager.isLocalEnabled
         .stateIn(viewModelScope, SharingStarted.Eagerly, false)
@@ -327,11 +327,14 @@ class GeminiViewModel(application: Application) : AndroidViewModel(application) 
         viewModelScope.launch { settingsManager.setSelectedPersona(personaId) }
     }
 
+
+
     val isLiteMode = settingsManager.isLiteMode
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(4500), true)
 
     val isVoiceDominantMode = settingsManager.isVoiceDominantMode
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(4500), false)
+
 
     val messageLength = settingsManager.messageLength
         .stateIn(viewModelScope, SharingStarted.Eagerly, "Normal")
@@ -406,8 +409,10 @@ class GeminiViewModel(application: Application) : AndroidViewModel(application) 
         _pendingAction.value = null
     }
 
-    private val _availableModels = MutableStateFlow<List<String>>(emptyList())
+    private val _availableModels = MutableStateFlow<List<AvailableModelOption>>(emptyList())
     val availableModels = _availableModels.asStateFlow()
+    private val _isFetchingAvailableModels = MutableStateFlow(false)
+    val isFetchingAvailableModels = _isFetchingAvailableModels.asStateFlow()
 
     private var sessionStartModelId: String? = null
     private var lastMemoryMaintenanceAt: Long = 0L
@@ -427,44 +432,93 @@ class GeminiViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     suspend fun fetchAvailableModels() = withContext(Dispatchers.IO) {
-        val urlString = buildLocalUrl("/v1/models")
-        val headers = buildLocalHeaders()
-
+        _isFetchingAvailableModels.value = true
         try {
-            val bodyStr: String?
-            if (connectionMode.value == ConnectionMode.Phone) {
-                 val remoteRequest = com.example.forgeint.RemoteRequest(
-                    url = urlString,
-                    method = "GET",
-                    headers = headers
-                )
-                bodyStr = phoneCommunicator.sendRequest(remoteRequest)
+            if (isLocalEnabled.value) {
+                val urlString = buildLocalUrl("/v1/models")
+                val headers = buildLocalHeaders()
+                val bodyStr: String? = if (connectionMode.value == ConnectionMode.Phone) {
+                    val remoteRequest = com.example.forgeint.RemoteRequest(
+                        url = urlString,
+                        method = "GET",
+                        headers = headers
+                    )
+                    phoneCommunicator.sendRequest(remoteRequest)
+                } else {
+                    val requestBuilder = Request.Builder().url(urlString)
+                    headers.forEach { (k, v) -> requestBuilder.addHeader(k, v) }
+                    val request = requestBuilder.build()
+                    val response = okHttpClient.newCall(request).execute()
+                    val responseBody = response.body?.string()
+                    response.close()
+                    responseBody
+                }
+
+                val models = bodyStr
+                    ?.let { JSONObject(it).optJSONArray("data") }
+                    ?.let { data ->
+                        buildList {
+                            for (i in 0 until data.length()) {
+                                val item = data.optJSONObject(i) ?: continue
+                                val id = item.optString("id").trim()
+                                if (id.isNotEmpty()) {
+                                    add(
+                                        AvailableModelOption(
+                                            id = id,
+                                            name = id.replace("-", " ").uppercase(),
+                                            description = "Local server model"
+                                        )
+                                    )
+                                }
+                            }
+                        }
+                    }
+                    .orEmpty()
+
+                _availableModels.value = models
             } else {
-                val requestBuilder = Request.Builder().url(urlString)
-                headers.forEach { (k, v) -> requestBuilder.addHeader(k, v) }
-                val request = requestBuilder.build()
+                val request = Request.Builder()
+                    .url("https://openrouter.ai/api/v1/models")
+                    .get()
+                    .build()
                 val response = okHttpClient.newCall(request).execute()
-                bodyStr = response.body?.string()
+                val bodyStr = response.body?.string().orEmpty()
                 response.close()
-            }
-            
-            if (bodyStr != null) {
-                val json = JSONObject(bodyStr)
-                val data = json.optJSONArray("data")
-                val models = mutableListOf<String>()
-                if (data != null) {
-                    for (i in 0 until data.length()) {
-                        val item = data.getJSONObject(i)
-                        val id = item.optString("id")
-                        if (id.isNotEmpty()) models.add(id)
+
+                if (!response.isSuccessful) {
+                    throw IOException("HTTP ${response.code}")
+                }
+
+                val data = JSONObject(bodyStr).optJSONArray("data")
+                val models = buildList {
+                    if (data != null) {
+                        for (i in 0 until data.length()) {
+                            val item = data.optJSONObject(i) ?: continue
+                            val id = item.optString("id").trim()
+                            if (!id.endsWith(":free")) continue
+
+                            val name = item.optString("name").trim()
+                            val description = item.optString("description").trim()
+                            add(
+                                AvailableModelOption(
+                                    id = id,
+                                    name = name.ifBlank { id.substringAfter('/').substringBefore(':') },
+                                    description = description.ifBlank { "OpenRouter free model" }
+                                )
+                            )
+                        }
                     }
                 }
-                if (models.isNotEmpty()) {
-                    _availableModels.value = models
-                }
+                    .distinctBy { it.id }
+                    .sortedBy { it.name.lowercase() }
+
+                _availableModels.value = models
             }
         } catch (e: Exception) {
-            e.printStackTrace()
+            android.util.Log.e(TAG, "Failed to fetch available models", e)
+            _availableModels.value = emptyList()
+        } finally {
+            _isFetchingAvailableModels.value = false
         }
     }
 
@@ -773,7 +827,11 @@ class GeminiViewModel(application: Application) : AndroidViewModel(application) 
             traitDao.traitDao().deleteAllTraits()
         }
     }
-
+    fun setAutoPowerSaveThreshold(threshold: Float) {
+        viewModelScope.launch {
+            settingsManager.setAutoPowerSavingModeThreshold(threshold)
+        }
+    }
     fun addManualMemory(rawContent: String, type: MemoryType) {
         viewModelScope.launch(Dispatchers.IO) {
             val content = rawContent.trim().removeSurrounding("\"").trim()
@@ -1680,199 +1738,8 @@ class GeminiViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
-    private suspend fun performWebSearch(query: String): String {
-        return withContext(Dispatchers.IO) {
-            val key = resolveTavilyApiKey()
-            if (key == null) {
-                return@withContext performDuckDuckGoSearch(
-                    query,
-                    priorError = "Tavily API key missing. Add TAVILY_API_KEY to local.properties."
-                )
-            }
-            performTavilySearch(query, key)
-        }
-    }
-
-    private suspend fun performWebSearchByConnection(query: String): String {
-        // Use same provider in both modes for deterministic behavior.
-        return performWebSearch(query)
-    }
-
-    private suspend fun performTavilySearch(query: String, key: String): String {
-        return withContext(Dispatchers.IO) {
-            try {
-                val requestBody = JSONObject()
-                    .put("query", query)
-                    .put("topic", "general")
-                    .put("search_depth", "basic")
-                    .put("max_results", 5)
-                    .put("include_answer", "advanced")
-                    .put("include_raw_content", false)
-                    .put("include_images", false)
-                    .put("include_image_descriptions", false)
-                    .toString()
-
-                val request = Request.Builder()
-                    .url("https://api.tavily.com/search")
-                    .addHeader("Authorization", "Bearer $key")
-                    .addHeader("Content-Type", "application/json")
-                    .post(requestBody.toRequestBody("application/json; charset=utf-8".toMediaType()))
-                    .build()
-
-                val response = okHttpClient.newCall(request).execute()
-                val bodyStr = response.body?.string().orEmpty()
-
-                if (!response.isSuccessful) {
-                    return@withContext performDuckDuckGoSearch(
-                        query,
-                        priorError = "Tavily HTTP ${response.code}: ${bodyStr.take(240)}"
-                    )
-                }
-
-                val json = JSONObject(bodyStr)
-                val answer = json.optString("answer", "")
-                val sourceResults = json.optJSONArray("results") ?: JSONArray()
-                val normalizedResults = JSONArray()
-
-                for (i in 0 until sourceResults.length()) {
-                    val item = sourceResults.optJSONObject(i) ?: continue
-                    normalizedResults.put(
-                        JSONObject()
-                            .put("title", item.optString("title"))
-                            .put("url", item.optString("url"))
-                            .put("content", item.optString("content"))
-                            .put("score", item.optDouble("score", 0.0))
-                            .put("favicon", item.optString("favicon"))
-                    )
-                }
-
-                JSONObject()
-                    .put("query", query)
-                    .put("summary", answer)
-                    .put("result_count", normalizedResults.length())
-                    .put("results", normalizedResults)
-                    .put("source", "tavily")
-                    .put("request_id", json.optString("request_id", ""))
-                    .put("response_time", json.optString("response_time", ""))
-                    .toString()
-            } catch (e: Exception) {
-                performDuckDuckGoSearch(query, priorError = "Tavily request failed: ${e.message}")
-            }
-        }
-    }
-
-    private fun parseDuckTopicsInto(
-        topics: JSONArray?,
-        out: JSONArray,
-        maxResults: Int
-    ) {
-        if (topics == null) return
-        for (i in 0 until topics.length()) {
-            if (out.length() >= maxResults) return
-            val item = topics.optJSONObject(i) ?: continue
-            val nested = item.optJSONArray("Topics")
-            if (nested != null) {
-                parseDuckTopicsInto(nested, out, maxResults)
-                continue
-            }
-            val text = item.optString("Text")
-            val url = item.optString("FirstURL")
-            if (text.isBlank()) continue
-            out.put(
-                JSONObject()
-                    .put("title", text.take(96))
-                    .put("url", url)
-                    .put("content", text)
-            )
-        }
-    }
-
-    private suspend fun performDuckDuckGoSearch(query: String, priorError: String? = null): String {
-        return withContext(Dispatchers.IO) {
-            try {
-                val encoded = URLEncoder.encode(query, "UTF-8")
-                val url = "https://api.duckduckgo.com/?q=$encoded&format=json&no_redirect=1&no_html=1&skip_disambig=1"
-                val request = Request.Builder().url(url).get().build()
-                val response = okHttpClient.newCall(request).execute()
-                val bodyStr = response.body?.string().orEmpty()
-
-                val json = JSONObject(bodyStr)
-                val summary = json.optString("AbstractText", "")
-                val heading = json.optString("Heading", "")
-                val abstractUrl = json.optString("AbstractURL", "")
-                val results = JSONArray()
-
-                if (summary.isNotBlank()) {
-                    results.put(
-                        JSONObject()
-                            .put("title", if (heading.isBlank()) "DuckDuckGo Summary" else heading)
-                            .put("url", abstractUrl)
-                            .put("content", summary)
-                    )
-                }
-                parseDuckTopicsInto(json.optJSONArray("RelatedTopics"), results, maxResults = 5)
-
-                JSONObject()
-                    .put("query", query)
-                    .put("summary", summary)
-                    .put("result_count", results.length())
-                    .put("results", results)
-                    .put("source", "duckduckgo_fallback")
-                    .put("fallback_reason", priorError ?: "")
-                    .toString()
-            } catch (e: Exception) {
-                JSONObject()
-                    .put("query", query)
-                    .put("summary", "")
-                    .put("result_count", 0)
-                    .put("results", JSONArray())
-                    .put("error", "Search failed: ${e.message}")
-                    .put("fallback_reason", priorError ?: "")
-                    .toString()
-            }
-        }
-    }
-
-    private fun getWebSearchTools(): List<Tool> {
-        return listOf(
-            Tool(
-                "function",
-                FunctionDetail(
-                    "web_search",
-                    "Search the web for current events or facts",
-                    mapOf(
-                        "type" to "object",
-                        "properties" to mapOf(
-                            "query" to mapOf(
-                                "type" to "string",
-                                "description" to "The search query"
-                            )
-                        ),
-                        "required" to listOf("query")
-                    )
-                )
-            )
-        )
-    }
-
-    private fun extractToolQuery(argumentsRaw: String?, fallbackQuery: String): String {
-        val raw = argumentsRaw?.trim().orEmpty()
-        if (raw.isBlank()) return fallbackQuery
-
-        try {
-            val obj = JSONObject(raw)
-            val fromJson = obj.optString("query", "").trim()
-            if (fromJson.isNotEmpty()) return fromJson
-        } catch (_: Exception) {
-        }
-
-        val quotedMatch = Regex("\"query\"\\s*:\\s*\"([^\"]+)\"").find(raw)?.groupValues?.getOrNull(1)?.trim()
-        if (!quotedMatch.isNullOrEmpty()) return quotedMatch
-
-        val looseMatch = Regex("query\\s*[:=]\\s*['\"]?(.+?)['\"]?$").find(raw)?.groupValues?.getOrNull(1)?.trim()
-        if (!looseMatch.isNullOrEmpty()) return looseMatch
-
-        return fallbackQuery
+    private fun getOpenRouterWebPlugins(): List<Plugin> {
+        return listOf(Plugin(id = "web"))
     }
 
     private suspend fun checkToolsAndComplete(
@@ -1882,105 +1749,25 @@ class GeminiViewModel(application: Application) : AndroidViewModel(application) 
         useLocalEndpoint: Boolean,
         fallbackQuery: String
     ): String? {
-        val toolCheckRequest = ChatRequest(
-            model = modelToUse,
-            messages = apiMessages,
-            stream = false,
-            max_tokens = maxTokensValue,
-            tools = getWebSearchTools(),
-            tool_choice = "auto"
-        )
-
-        val blockingResponse: ChatResponse? = if (useLocalEndpoint) {
-            val urlString = buildLocalUrl("/v1/chat/completions")
-            val headers = buildLocalHeaders()
-            if (connectionMode.value == ConnectionMode.Phone) {
-                val remoteRequest = com.example.forgeint.RemoteRequest(
-                    url = urlString,
-                    method = "POST",
-                    headers = headers,
-                    body = Gson().toJson(toolCheckRequest)
-                )
-                val jsonStr = phoneCommunicator.sendRequest(remoteRequest)
-                if (jsonStr != null) try {
-                    Gson().fromJson(jsonStr, ChatResponse::class.java)
-                } catch (_: Exception) {
-                    null
-                } else null
-            } else {
-                apiService.chatLocalBlocking(urlString, headers, toolCheckRequest)
-            }
-        } else {
-            if (connectionMode.value == ConnectionMode.Phone) {
-                val currentKey = requireOpenRouterKey()
-                val headers = mapOf(
-                    "Authorization" to "Bearer $currentKey",
-                    "HTTP-Referer" to "https://forgeint.app",
-                    "X-Title" to "ForgeInt"
-                )
-                val remoteRequest = com.example.forgeint.RemoteRequest(
-                    url = "https://openrouter.ai/api/v1/chat/completions",
-                    method = "POST",
-                    headers = headers,
-                    body = Gson().toJson(toolCheckRequest)
-                )
-                val jsonStr = phoneCommunicator.sendRequest(remoteRequest)
-                if (jsonStr != null) try {
-                    Gson().fromJson(jsonStr, ChatResponse::class.java)
-                } catch (_: Exception) {
-                    null
-                } else null
-            } else {
-                val currentKey = requireOpenRouterKey()
-                apiService.chatOpenRouterBlocking(
-                    "Bearer $currentKey",
-                    "https://forgeint.app",
-                    "ForgeInt",
-                    toolCheckRequest
-                )
-            }
+        if (useLocalEndpoint) {
+            _isWebSearching.value = false
+            return callLmStudioStream(apiMessages, modelToUse, maxTokensValue)
         }
 
-        val choice = blockingResponse?.choices?.firstOrNull()
-        val toolCall = choice?.message?.tool_calls?.firstOrNull()
-        if (toolCall?.function?.name == "web_search") {
+        if (fallbackQuery.isBlank()) {
+            _isWebSearching.value = false
+        }
+
+        return try {
             _isWebSearching.value = true
-            val query = extractToolQuery(toolCall.function.arguments, fallbackQuery)
-            val searchResult = try {
-                if (query.isBlank()) {
-                    "Search failed: missing query argument."
-                } else {
-                    performWebSearchByConnection(query)
-                }
-            } finally {
-                _isWebSearching.value = false
-            }
-
-            apiMessages.add(choice.message)
-            apiMessages.add(
-                ApiMessage(
-                    role = "tool",
-                    content = searchResult,
-                    tool_call_id = toolCall.id,
-                    name = "web_search"
-                )
+            callOpenRouterStream(
+                messages = apiMessages,
+                modelId = modelToUse,
+                maxTokens = maxTokensValue,
+                plugins = getOpenRouterWebPlugins()
             )
-
-            return if (useLocalEndpoint) {
-                callLmStudioStream(apiMessages, modelToUse, maxTokensValue)
-            } else {
-                callOpenRouterStream(apiMessages, modelToUse, maxTokensValue)
-            }
-        }
-
-        if (!choice?.message?.content.isNullOrBlank()) {
-            return choice?.message?.content
-        }
-        _isWebSearching.value = false
-        return if (useLocalEndpoint) {
-            callLmStudioStream(apiMessages, modelToUse, maxTokensValue)
-        } else {
-            callOpenRouterStream(apiMessages, modelToUse, maxTokensValue)
+        } finally {
+            _isWebSearching.value = false
         }
     }
 
@@ -2378,9 +2165,19 @@ class GeminiViewModel(application: Application) : AndroidViewModel(application) 
         return okio.Buffer().writeUtf8(this).asResponseBody(mediaType)
     }
 
-    private suspend fun callOpenRouterStream(messages: List<ApiMessage>, modelId: String, maxTokens: Int): String? {
-        val request = ChatRequest(model = modelId, messages = messages, stream = true,
-            max_tokens = maxTokens)
+    private suspend fun callOpenRouterStream(
+        messages: List<ApiMessage>,
+        modelId: String,
+        maxTokens: Int,
+        plugins: List<Plugin>? = null
+    ): String? {
+        val request = ChatRequest(
+            model = modelId,
+            messages = messages,
+            stream = true,
+            max_tokens = maxTokens,
+            plugins = plugins
+        )
         val currentKey = requireOpenRouterKey()
 
         if (connectionMode.value == ConnectionMode.Phone) {
@@ -2421,14 +2218,6 @@ class GeminiViewModel(application: Application) : AndroidViewModel(application) 
             ?: throw IllegalStateException(
                 "OpenRouter API key missing. Add OPENROUTER_API_KEY to local.properties or enter a custom key in Settings."
             )
-    }
-
-    private fun resolveTavilyApiKey(): String? {
-        val key = BuildConfig.TAVILY_API_KEY.trim()
-        return key.takeIf {
-            it.startsWith("tvly-") &&
-                !it.contains("REPLACE_WITH_YOUR_TAVILY_API_KEY", ignoreCase = true)
-        }
     }
 
     private suspend fun processStream(responseBody: ResponseBody): String {
@@ -2489,6 +2278,7 @@ interface GeminiApiService {
         @Header("Authorization") auth: String,
         @Header("HTTP-Referer") referer: String,
         @Header("X-Title") title: String,
+
         @Body request: ChatRequest
     ): ResponseBody
 
@@ -2537,6 +2327,7 @@ data class ChatRequest(
     @SerializedName("temperature") val temperature: Double? = 0.7,
     @SerializedName("max_tokens") val max_tokens: Int? = null,
     @SerializedName("stream") val stream: Boolean? = false,
+    @SerializedName("plugins") val plugins: List<Plugin>? = null,
     @SerializedName("tools") val tools: List<Tool>? = null,
     @SerializedName("tool_choice") val tool_choice: String? = null
 )
@@ -2568,6 +2359,22 @@ data class ApiMessage(
     @SerializedName("tool_calls") val tool_calls: List<ToolCall>? = null,
     @SerializedName("tool_call_id") val tool_call_id: String? = null,
     @SerializedName("name") val name: String? = null
+)
+
+data class Plugin(
+    @SerializedName("id") val id: String,
+    @SerializedName("engine") val engine: String? = null,
+    @SerializedName("max_results") val max_results: Int? = null,
+    @SerializedName("search_prompt") val search_prompt: String? = null,
+    @SerializedName("include_domains") val include_domains: List<String>? = null,
+    @SerializedName("exclude_domains") val exclude_domains: List<String>? = null,
+    @SerializedName("enabled") val enabled: Boolean? = null
+)
+
+data class AvailableModelOption(
+    val id: String,
+    val name: String,
+    val description: String
 )
 
 data class Tool(

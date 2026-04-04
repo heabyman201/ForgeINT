@@ -1389,6 +1389,7 @@ fun VoiceChatScreen(
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
     val colors = LocalForgeIntColors.current
+    val haptic = LocalHapticFeedback.current
     val latestVoiceResult by rememberUpdatedState(onVoiceResult)
     val streamingText by streamingMessageFlow.collectAsStateWithLifecycle(initialValue = null)
     val isThinking by isThinkingFlow.collectAsStateWithLifecycle(initialValue = false)
@@ -1414,6 +1415,10 @@ fun VoiceChatScreen(
     val sentenceDelimiters = remember { charArrayOf('.', '!', '?', '\n') }
     var lastReadIndex by remember { mutableIntStateOf(0) }
     var previousStreamingState by remember { mutableStateOf(false) }
+    var suppressAutoListen by remember { mutableStateOf(false) }
+    var lastCompletedAssistantReply by remember { mutableStateOf<String?>(null) }
+    var lastHapticListening by remember { mutableStateOf(false) }
+    var lastHapticSpeaking by remember { mutableStateOf(false) }
 
     val startListeningState = rememberUpdatedState(newValue = {
         if (!isMicPermissionGranted.value || isGenerating || isSpeaking || isListening) {
@@ -1421,6 +1426,7 @@ fun VoiceChatScreen(
         } else if (!SpeechRecognizer.isRecognitionAvailable(context)) {
             recognizerError = "Speech recognition unavailable"
         } else {
+            suppressAutoListen = false
             partialTranscript = ""
             recognizerError = null
             voiceLevel = 0.14f
@@ -1434,6 +1440,43 @@ fun VoiceChatScreen(
             speechRecognizer?.startListening(intent)
         }
     })
+
+    val interruptVoiceLoop: (Boolean, Boolean) -> Unit = remember(
+        speechRecognizer,
+        tts.value,
+        isGenerating,
+        lastAssistantReply,
+        streamingText
+    ) {
+        { stopGeneration: Boolean, resumeListening: Boolean ->
+            suppressAutoListen = !resumeListening
+            speechRecognizer?.cancel()
+            tts.value?.stop()
+            queuedUtterances = 0
+            isSpeaking = false
+            isListening = false
+            voiceLevel = 0.08f
+            partialTranscript = ""
+            recognizerError = null
+            val visibleReply = streamingText?.takeIf { it.isNotBlank() } ?: lastAssistantReply
+            if (visibleReply.isNotBlank()) {
+                lastReadIndex = visibleReply.length
+                lastCompletedAssistantReply = visibleReply
+            } else {
+                lastReadIndex = 0
+            }
+            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+            if (stopGeneration && isGenerating) {
+                onStopResponse()
+            }
+            if (resumeListening) {
+                coroutineScope.launch {
+                    delay(180)
+                    startListeningState.value.invoke()
+                }
+            }
+        }
+    }
 
     val micPermissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
@@ -1508,6 +1551,7 @@ fun VoiceChatScreen(
                         .orEmpty()
                     partialTranscript = spokenText
                     if (spokenText.isNotEmpty()) {
+                        suppressAutoListen = false
                         latestVoiceResult(spokenText)
                     } else if (!isGenerating && !isSpeaking) {
                         coroutineScope.launch {
@@ -1553,7 +1597,7 @@ fun VoiceChatScreen(
                     isSpeaking = false
                     voiceLevel = 0.08f
                 }
-                if (utteranceId == "final_segment" && !isGenerating) {
+                if (utteranceId?.startsWith("final_segment") == true && !isGenerating && !suppressAutoListen) {
                     coroutineScope.launch {
                         delay(450)
                         startListeningState.value.invoke()
@@ -1566,9 +1610,11 @@ fun VoiceChatScreen(
                 if (queuedUtterances == 0) {
                     isSpeaking = false
                 }
-                coroutineScope.launch {
-                    delay(450)
-                    startListeningState.value.invoke()
+                if (!suppressAutoListen) {
+                    coroutineScope.launch {
+                        delay(450)
+                        startListeningState.value.invoke()
+                    }
                 }
             }
         })
@@ -1614,6 +1660,20 @@ fun VoiceChatScreen(
         }
     }
 
+    LaunchedEffect(isListening) {
+        if (isListening && !lastHapticListening) {
+            haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+        }
+        lastHapticListening = isListening
+    }
+
+    LaunchedEffect(isSpeaking) {
+        if (isSpeaking && !lastHapticSpeaking) {
+            haptic.performHapticFeedback(HapticFeedbackType.Confirm)
+        }
+        lastHapticSpeaking = isSpeaking
+    }
+
     LaunchedEffect(streamingText, isTtsReady.value) {
         if (!isTtsReady.value || streamingText.isNullOrEmpty()) {
             if (streamingText == null && lastReadIndex > 0) {
@@ -1641,14 +1701,24 @@ fun VoiceChatScreen(
         }
 
         if (previousStreamingState && !isStreamingObserved) {
-            val remainingText = if (lastAssistantReply.length > lastReadIndex) {
-                lastAssistantReply.substring(lastReadIndex).trim()
-            } else {
-                ""
-            }
-            if (remainingText.isNotEmpty()) {
-                tts.value?.speak(remainingText, TextToSpeech.QUEUE_ADD, null, "final_segment")
-            } else if (!isGenerating) {
+            if (lastAssistantReply.isNotBlank() && lastAssistantReply != lastCompletedAssistantReply) {
+                val remainingText = if (lastAssistantReply.length > lastReadIndex) {
+                    lastAssistantReply.substring(lastReadIndex).trim()
+                } else {
+                    ""
+                }
+                lastCompletedAssistantReply = lastAssistantReply
+                if (remainingText.isNotEmpty()) {
+                    tts.value?.speak(
+                        remainingText,
+                        TextToSpeech.QUEUE_ADD,
+                        null,
+                        "final_segment_${lastAssistantReply.hashCode()}"
+                    )
+                } else if (!isGenerating && !suppressAutoListen) {
+                    startListeningState.value.invoke()
+                }
+            } else if (!isGenerating && !suppressAutoListen) {
                 startListeningState.value.invoke()
             }
             lastReadIndex = 0
@@ -1715,6 +1785,10 @@ fun VoiceChatScreen(
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(120.dp)
+                    .clip(RoundedCornerShape(28.dp))
+                    .clickable(enabled = isSpeaking || isGenerating) {
+                        interruptVoiceLoop(true, true)
+                    }
             )
             Spacer(modifier = Modifier.height(20.dp))
             Text(
@@ -1725,6 +1799,14 @@ fun VoiceChatScreen(
                 maxLines = 4
             )
             Spacer(modifier = Modifier.height(14.dp))
+            Text(
+                text = if (isSpeaking || isGenerating) "Tap the wave to interrupt" else "Tap Listen to jump back in",
+                color = Color(0xFF7E8A97),
+                textAlign = TextAlign.Center,
+                style = MaterialTheme.typography.caption3,
+                maxLines = 2
+            )
+            Spacer(modifier = Modifier.height(12.dp))
             if (lastUserPrompt.isNotBlank()) {
                 Text(
                     text = "You: ${lastUserPrompt.take(80)}",
@@ -1751,11 +1833,7 @@ fun VoiceChatScreen(
             ) {
                 Chip(
                     onClick = {
-                        speechRecognizer?.cancel()
-                        tts.value?.stop()
-                        queuedUtterances = 0
-                        isSpeaking = false
-                        startListeningState.value.invoke()
+                        interruptVoiceLoop(false, true)
                     },
                     label = { Text(if (isListening) "Reset Mic" else "Listen") },
                     icon = { Icon(Icons.Default.Mic, contentDescription = null) },
@@ -1767,11 +1845,7 @@ fun VoiceChatScreen(
                 )
                 Chip(
                     onClick = {
-                        speechRecognizer?.cancel()
-                        tts.value?.stop()
-                        queuedUtterances = 0
-                        isSpeaking = false
-                        if (isGenerating) onStopResponse()
+                        interruptVoiceLoop(true, false)
                     },
                     label = { Text(if (isGenerating || isSpeaking) "Stop" else "Quiet") },
                     icon = { Icon(Icons.Default.Stop, contentDescription = null) },
@@ -3573,7 +3647,7 @@ fun MemoryManagementScreen(
             item {
                 ListHeader {
                     Text(
-                        "Manual Add",
+                        "Manual Memory",
                         color = colors.primary,
                         style = MaterialTheme.typography.caption2,
                         fontWeight = FontWeight.Bold

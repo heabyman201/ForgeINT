@@ -6,6 +6,7 @@ import Personas
 import Persona
 import com.google.gson.Gson
 import com.google.gson.reflect.TypeToken
+import androidx.core.content.edit
 
 class CustomPersonaRepository(context: Context) {
     private val prefs: SharedPreferences = context.getSharedPreferences("custom_personas_wear", Context.MODE_PRIVATE)
@@ -36,6 +37,6 @@ class CustomPersonaRepository(context: Context) {
 
     private fun saveList(list: List<Persona>) {
         val json = gson.toJson(list)
-        prefs.edit().putString(KEY_CUSTOM_PERSONAS, json).apply()
+        prefs.edit { putString(KEY_CUSTOM_PERSONAS, json) }
     }
 }
