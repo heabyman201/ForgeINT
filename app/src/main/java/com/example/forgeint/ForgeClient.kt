@@ -1,5 +1,7 @@
 package com.example.forgeint
 
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import com.google.gson.Gson
 import com.google.gson.reflect.TypeToken
 import kotlinx.coroutines.Dispatchers
@@ -8,7 +10,10 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import java.io.ByteArrayOutputStream
 import java.util.concurrent.TimeUnit
+import kotlin.math.max
+import kotlin.math.roundToInt
 
 class ForgeClient(
     private val host: String = DEFAULT_HOST,
@@ -70,7 +75,8 @@ class ForgeClient(
      */
     suspend fun execute(
         command: String,
-        payload: Map<String, Any> = emptyMap()
+        payload: Map<String, Any> = emptyMap(),
+        imageOptions: RemoteImageOptions? = null
     ): ForgeResponse = withContext(Dispatchers.IO) {
         val normalizedCommand = normalizeCommand(command)
         val body = mutableMapOf<String, Any>("command" to normalizedCommand)
@@ -90,27 +96,50 @@ class ForgeClient(
             val contentType = response.header("Content-Type") ?: ""
             val charset = response.body?.contentType()?.charset(Charsets.UTF_8) ?: Charsets.UTF_8
             val isImageResponse = contentType.contains("image", ignoreCase = true)
+            val processedImage = if (isImageResponse && rawBytes != null && imageOptions != null) {
+                compressImageForWatch(rawBytes, imageOptions)
+            } else {
+                null
+            }
 
             ForgeResponse(
                 success = response.isSuccessful,
                 code = response.code,
-                contentType = contentType,
+                contentType = if (processedImage?.wasCompressed == true) {
+                    "image/jpeg"
+                } else {
+                    contentType
+                },
                 body = if (isImageResponse || rawBytes == null) {
                     ""
                 } else {
                     rawBytes.toString(charset)
                 },
-                bytes = if (isImageResponse) rawBytes else null
+                bytes = when {
+                    processedImage != null -> processedImage.bytes
+                    isImageResponse -> rawBytes
+                    else -> null
+                },
+                imageWidth = processedImage?.width,
+                imageHeight = processedImage?.height,
+                originalByteCount = if (isImageResponse) rawBytes?.size else null,
+                compressedByteCount = when {
+                    processedImage != null -> processedImage.bytes.size
+                    isImageResponse -> rawBytes?.size
+                    else -> null
+                },
+                imageWasCompressed = processedImage?.wasCompressed ?: false
             )
         }
     }
 
     suspend fun executeJson(
         command: String,
-        payloadJson: String
+        payloadJson: String,
+        imageOptions: RemoteImageOptions? = null
     ): ForgeResponse {
         val parsedPayload = parsePayloadJson(payloadJson)
-        return execute(command = command, payload = parsedPayload)
+        return execute(command = command, payload = parsedPayload, imageOptions = imageOptions)
     }
 
     private fun parsePayloadJson(payloadJson: String): Map<String, Any> {
@@ -122,6 +151,88 @@ class ForgeClient(
             object : TypeToken<Map<String, Any>>() {}.type
         ) ?: emptyMap()
     }
+
+    private fun compressImageForWatch(
+        rawBytes: ByteArray,
+        imageOptions: RemoteImageOptions
+    ): ProcessedImage? {
+        val normalizedOptions = imageOptions.normalized()
+        val boundsOptions = BitmapFactory.Options().apply {
+            inJustDecodeBounds = true
+        }
+        BitmapFactory.decodeByteArray(rawBytes, 0, rawBytes.size, boundsOptions)
+
+        val sourceWidth = boundsOptions.outWidth
+        val sourceHeight = boundsOptions.outHeight
+        if (sourceWidth <= 0 || sourceHeight <= 0) return null
+
+        val decodeOptions = BitmapFactory.Options().apply {
+            inSampleSize = calculateInSampleSize(
+                width = sourceWidth,
+                height = sourceHeight,
+                maxDimension = normalizedOptions.maxDimensionPx
+            )
+        }
+
+        val decodedBitmap = BitmapFactory.decodeByteArray(rawBytes, 0, rawBytes.size, decodeOptions)
+            ?: return null
+
+        var scaledBitmap: Bitmap? = null
+        return try {
+            val maxSide = max(decodedBitmap.width, decodedBitmap.height)
+            scaledBitmap = if (maxSide > normalizedOptions.maxDimensionPx) {
+                val scale = normalizedOptions.maxDimensionPx.toFloat() / maxSide.toFloat()
+                val scaledWidth = (decodedBitmap.width * scale).roundToInt().coerceAtLeast(1)
+                val scaledHeight = (decodedBitmap.height * scale).roundToInt().coerceAtLeast(1)
+                Bitmap.createScaledBitmap(decodedBitmap, scaledWidth, scaledHeight, true)
+            } else {
+                decodedBitmap
+            }
+
+            val outputStream = ByteArrayOutputStream()
+            if (!scaledBitmap.compress(Bitmap.CompressFormat.JPEG, normalizedOptions.jpegQuality, outputStream)) {
+                return null
+            }
+
+            val compressedBytes = outputStream.toByteArray()
+            val dimensionsChanged = scaledBitmap.width != sourceWidth || scaledBitmap.height != sourceHeight
+            val useCompressedBytes = compressedBytes.isNotEmpty() && (
+                compressedBytes.size < rawBytes.size || dimensionsChanged
+            )
+
+            ProcessedImage(
+                bytes = if (useCompressedBytes) compressedBytes else rawBytes,
+                width = scaledBitmap.width,
+                height = scaledBitmap.height,
+                wasCompressed = useCompressedBytes
+            )
+        } finally {
+            if (scaledBitmap != null && scaledBitmap !== decodedBitmap && !scaledBitmap.isRecycled) {
+                scaledBitmap.recycle()
+            }
+            if (!decodedBitmap.isRecycled) {
+                decodedBitmap.recycle()
+            }
+        }
+    }
+
+    private fun calculateInSampleSize(
+        width: Int,
+        height: Int,
+        maxDimension: Int
+    ): Int {
+        var sampleSize = 1
+        var sampledWidth = width
+        var sampledHeight = height
+
+        while (sampledWidth > maxDimension * 2 || sampledHeight > maxDimension * 2) {
+            sampleSize *= 2
+            sampledWidth /= 2
+            sampledHeight /= 2
+        }
+
+        return sampleSize.coerceAtLeast(1)
+    }
 }
 
 data class ForgeResponse(
@@ -129,5 +240,17 @@ data class ForgeResponse(
     val code: Int,
     val contentType: String,
     val body: String,
-    val bytes: ByteArray? = null   // for screenshot PNG
+    val bytes: ByteArray? = null,
+    val imageWidth: Int? = null,
+    val imageHeight: Int? = null,
+    val originalByteCount: Int? = null,
+    val compressedByteCount: Int? = null,
+    val imageWasCompressed: Boolean = false
+)
+
+private data class ProcessedImage(
+    val bytes: ByteArray,
+    val width: Int,
+    val height: Int,
+    val wasCompressed: Boolean
 )

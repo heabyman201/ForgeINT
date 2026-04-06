@@ -355,7 +355,7 @@ fun SettingsScreen(
                     },
                     icon = { Icon(Icons.Default.Science, "Experimental", tint = colors.replyIcon) },
                     colors = ChipDefaults.gradientBackgroundChipColors(
-                        startBackgroundColor = colors.botBubble,
+                        startBackgroundColor = colors.userBubble,
                         endBackgroundColor = colors.surface
                     ),
                     modifier = Modifier.fillMaxWidth()
@@ -437,11 +437,11 @@ fun ExperimentalSettingsScreen(
                     onClick = onNavigateToRemoteCommand,
                     label = { Text("Remote Control", color = colors.botText) },
                     secondaryLabel = {
-                        Text("Send Flask commands to the hardcoded host", maxLines = 2, overflow = TextOverflow.Ellipsis, color = colors.userText)
+                        Text("Send remote commands to the host", maxLines = 2, overflow = TextOverflow.Ellipsis, color = colors.userText)
                     },
                     icon = { Icon(Icons.Default.Computer, "Remote Control", tint = colors.replyIcon) },
                     colors = ChipDefaults.gradientBackgroundChipColors(
-                        startBackgroundColor = colors.botBubble, endBackgroundColor = colors.surface
+                        startBackgroundColor = colors.userBubble, endBackgroundColor = colors.surface
                     ),
                     modifier = Modifier.fillMaxWidth()
                 )

@@ -1,12 +1,15 @@
 package com.example.forgeint.presentation
 
+import android.graphics.BitmapFactory
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.focusable
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -17,7 +20,9 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AcUnit
@@ -25,6 +30,7 @@ import androidx.compose.material.icons.filled.Brightness3
 import androidx.compose.material.icons.filled.BrightnessHigh
 import androidx.compose.material.icons.filled.BrightnessLow
 import androidx.compose.material.icons.filled.CameraAlt
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.PowerSettingsNew
@@ -46,11 +52,18 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.input.rotary.onRotaryScrollEvent
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.wear.compose.foundation.lazy.TransformingLazyColumn
 import androidx.wear.compose.foundation.lazy.rememberTransformingLazyColumnState
 import androidx.wear.compose.material.Chip
@@ -62,8 +75,129 @@ import androidx.wear.compose.material.Scaffold
 import androidx.wear.compose.material.Text
 import androidx.wear.compose.material3.ScrollIndicator
 import com.example.forgeint.ForgeClient
+import com.example.forgeint.ForgeResponse
+import com.example.forgeint.RemoteImageOptions
 import com.example.forgeint.presentation.theme.LocalForgeIntColors
 import kotlinx.coroutines.launch
+
+private fun formatByteCount(bytes: Int?): String {
+    val safeBytes = bytes ?: return ""
+    return when {
+        safeBytes >= 1024 * 1024 -> String.format("%.2f MB", safeBytes / (1024f * 1024f))
+        safeBytes >= 1024 -> String.format("%.1f KB", safeBytes / 1024f)
+        else -> "$safeBytes B"
+    }
+}
+
+private fun screenshotSummary(response: ForgeResponse): String {
+    val dimensionSummary = if (response.imageWidth != null && response.imageHeight != null) {
+        "${response.imageWidth}x${response.imageHeight}"
+    } else {
+        "Image ready"
+    }
+    val compressedSize = formatByteCount(response.compressedByteCount)
+    val originalSize = formatByteCount(response.originalByteCount)
+
+    return when {
+        response.imageWasCompressed && compressedSize.isNotBlank() && originalSize.isNotBlank() ->
+            "$dimensionSummary - $compressedSize from $originalSize"
+        compressedSize.isNotBlank() -> "$dimensionSummary - $compressedSize"
+        else -> dimensionSummary
+    }
+}
+
+private fun clampPan(offset: Float, containerSize: Int, scale: Float): Float {
+    val maxOffset = ((containerSize * (scale - 1f)) / 2f).coerceAtLeast(0f)
+    return offset.coerceIn(-maxOffset, maxOffset)
+}
+
+@Composable
+private fun FullscreenScreenshotOverlay(
+    screenshotImage: androidx.compose.ui.graphics.ImageBitmap,
+    summary: String,
+    onDismiss: () -> Unit
+) {
+    var zoomScale by remember { mutableStateOf(1f) }
+    var panX by remember { mutableStateOf(0f) }
+    var panY by remember { mutableStateOf(0f) }
+    var containerSize by remember { mutableStateOf(IntSize.Zero) }
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color.Black.copy(alpha = 0.96f))
+    ) {
+        Image(
+            bitmap = screenshotImage,
+            contentDescription = "Expanded remote screenshot preview",
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(horizontal = 8.dp, vertical = 20.dp)
+                .onSizeChanged { containerSize = it }
+                .pointerInput(Unit) {
+                    detectTransformGestures { _, pan, zoom, _ ->
+                        val updatedScale = (zoomScale * zoom).coerceIn(1f, 6f)
+                        if (updatedScale == 1f) {
+                            zoomScale = 1f
+                            panX = 0f
+                            panY = 0f
+                        } else {
+                            zoomScale = updatedScale
+                            panX = clampPan(panX + pan.x, containerSize.width, updatedScale)
+                            panY = clampPan(panY + pan.y, containerSize.height, updatedScale)
+                        }
+                    }
+                }
+                .pointerInput(Unit) {
+                    detectTapGestures(
+                        onDoubleTap = {
+                            if (zoomScale > 1f) {
+                                zoomScale = 1f
+                                panX = 0f
+                                panY = 0f
+                            } else {
+                                zoomScale = 2.25f
+                            }
+                        }
+                    )
+                }
+                .graphicsLayer {
+                    scaleX = zoomScale
+                    scaleY = zoomScale
+                    translationX = panX
+                    translationY = panY
+                },
+            contentScale = ContentScale.Fit
+        )
+
+        Box(
+            modifier = Modifier
+                .align(Alignment.TopEnd)
+                .padding(10.dp)
+                .size(36.dp)
+                .clip(CircleShape)
+                .background(Color.Black.copy(alpha = 0.6f))
+                .clickable(onClick = onDismiss),
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(
+                imageVector = Icons.Default.Close,
+                contentDescription = "Close screenshot",
+                tint = Color.White
+            )
+        }
+
+        Text(
+            text = "$summary\nPinch to zoom, drag to pan, double tap to reset",
+            style = MaterialTheme.typography.caption3,
+            color = Color.White,
+            textAlign = TextAlign.Center,
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .padding(horizontal = 16.dp, vertical = 14.dp)
+        )
+    }
+}
 
 @Composable
 private fun CircularActionButton(
@@ -183,11 +317,21 @@ fun RemoteCommandScreen(
     val listState = rememberTransformingLazyColumnState()
     val coroutineScope = rememberCoroutineScope()
     val focusRequester = remember { FocusRequester() }
+    val screenshotImageOptions = remember {
+        RemoteImageOptions.watchPreview(maxDimensionPx = 1080, jpegQuality = 82)
+    }
     val forgeClient = remember(remoteHostIp, remotePort) { 
         ForgeClient(host = remoteHostIp, port = remotePort.toIntOrNull() ?: 1235) 
     }
     var statusText by remember { mutableStateOf("Ready") }
     var isExecuting by remember { mutableStateOf(false) }
+    var latestScreenshot by remember { mutableStateOf<ForgeResponse?>(null) }
+    var isFullscreenPreviewOpen by remember { mutableStateOf(false) }
+    val screenshotPreview = remember(latestScreenshot?.bytes) {
+        latestScreenshot?.bytes?.let { bytes ->
+            BitmapFactory.decodeByteArray(bytes, 0, bytes.size)?.asImageBitmap()
+        }
+    }
 
     LaunchedEffect(Unit) {
         focusRequester.requestFocus()
@@ -198,17 +342,32 @@ fun RemoteCommandScreen(
             coroutineScope.launch {
                 isExecuting = true
                 statusText = "Running $command..."
+                val imageOptions = if (command == "screenshot") screenshotImageOptions else null
                 runCatching {
                     if (payloadJson.isBlank()) {
-                        forgeClient.execute(command = command)
+                        forgeClient.execute(command = command, imageOptions = imageOptions)
                     } else {
                         forgeClient.executeJson(
                             command = command,
-                            payloadJson = payloadJson
+                            payloadJson = payloadJson,
+                            imageOptions = imageOptions
                         )
                     }
                 }.onSuccess { response ->
-                    statusText = if (response.success) "Success" else "Error: ${response.code}"
+                    if (response.success) {
+                        if (command == "screenshot") {
+                            latestScreenshot = response.takeIf { it.bytes != null }
+                            statusText = if (response.bytes != null) {
+                                screenshotSummary(response)
+                            } else {
+                                "No image returned"
+                            }
+                        } else {
+                            statusText = "Success"
+                        }
+                    } else {
+                        statusText = "Error: ${response.code}"
+                    }
                 }.onFailure {
                     statusText = "Failed"
                 }
@@ -260,13 +419,66 @@ fun RemoteCommandScreen(
             }
 
             item {
+                val statusColor = when {
+                    statusText.startsWith("Error") || statusText == "Failed" || statusText == "No image returned" ->
+                        Color(0xFFFF8A80)
+                    statusText.contains("KB") || statusText.contains("MB") || statusText == "Success" ->
+                        colors.primary
+                    else -> colors.userText
+                }
                 Text(
                     text = statusText,
                     style = MaterialTheme.typography.caption2,
-                    color = if (statusText == "Success") colors.primary else if (statusText == "Failed") Color(0xFFFF8A80) else colors.userText,
+                    color = statusColor,
                     modifier = Modifier.fillMaxWidth(),
                     textAlign = TextAlign.Center
                 )
+            }
+
+            item {
+                val screenshotResponse = latestScreenshot
+                if (screenshotPreview != null && screenshotResponse != null) {
+                    Column(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        Text(
+                            text = "Latest Screenshot",
+                            style = MaterialTheme.typography.caption2,
+                            color = colors.botText,
+                            textAlign = TextAlign.Center
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(132.dp)
+                                .clip(RoundedCornerShape(20.dp))
+                                .background(colors.surface)
+                                .border(1.dp, colors.primary.copy(alpha = 0.28f), RoundedCornerShape(20.dp))
+                                .clickable { isFullscreenPreviewOpen = true }
+                                .padding(6.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Image(
+                                bitmap = screenshotPreview,
+                                contentDescription = "Remote screenshot preview",
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .clip(RoundedCornerShape(14.dp)),
+                                contentScale = ContentScale.Fit
+                            )
+                        }
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Text(
+                            text = "${screenshotSummary(screenshotResponse)}\nTap image to expand",
+                            style = MaterialTheme.typography.caption3,
+                            color = colors.userText,
+                            textAlign = TextAlign.Center,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
+                }
             }
 
             // Power Presets (Top)
@@ -408,6 +620,20 @@ fun RemoteCommandScreen(
                     )
                 }
             }
+        }
+    }
+
+    val fullscreenScreenshot = latestScreenshot
+    if (isFullscreenPreviewOpen && screenshotPreview != null && fullscreenScreenshot != null) {
+        Dialog(
+            onDismissRequest = { isFullscreenPreviewOpen = false },
+            properties = DialogProperties(usePlatformDefaultWidth = false)
+        ) {
+            FullscreenScreenshotOverlay(
+                screenshotImage = screenshotPreview,
+                summary = screenshotSummary(fullscreenScreenshot),
+                onDismiss = { isFullscreenPreviewOpen = false }
+            )
         }
     }
 }
