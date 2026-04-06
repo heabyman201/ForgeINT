@@ -1,7 +1,6 @@
 package com.example.forgeint.presentation
 
 import Persona
-import androidx.activity.result.launch
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.PaddingValues
@@ -10,9 +9,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CheckCircle
-import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.RadioButtonUnchecked
-import androidx.compose.material.icons.rounded.Add
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -37,29 +34,21 @@ import androidx.wear.compose.material.ScalingLazyColumn
 import androidx.wear.compose.material.Text
 import androidx.wear.compose.material.items
 import androidx.wear.compose.material.rememberScalingLazyListState
-import com.example.weargemini.data.SettingsManager
 import kotlinx.coroutines.launch
 
-import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 
-import androidx.compose.material.icons.filled.CheckCircle
-import androidx.compose.material.icons.filled.RadioButtonUnchecked
 import androidx.compose.runtime.*
 
 
-import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.font.FontWeight
 
-import androidx.compose.ui.unit.dp
-import androidx.wear.compose.foundation.rotary.rotaryScrollable
 import androidx.wear.compose.material.*
 import com.example.forgeint.presentation.theme.LocalForgeIntColors
-import kotlinx.coroutines.launch
 
 @Composable
 fun PersonaSettings(

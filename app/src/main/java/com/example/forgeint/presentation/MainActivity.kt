@@ -15,7 +15,6 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.wear.compose.navigation.SwipeDismissableNavHost
 import androidx.wear.compose.navigation.composable
 import androidx.wear.compose.navigation.rememberSwipeDismissableNavController
-import com.example.weargemini.data.SettingsManager
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -356,31 +355,21 @@ fun GeminiApp(viewModel: GeminiViewModel = viewModel(), intent: android.content.
                 val onToggleVoiceDominant: (Boolean) -> Unit = remember(viewModel) { { enabled: Boolean -> viewModel.setVoiceDominantMode(enabled); Unit } }
                 val onNavigateToModelSettings: () -> Unit = remember(navController) { { navController.navigate("model_settings") } }
                 val onNavigateToIP: () -> Unit = remember(navController) { { navController.navigate("ip_select") } }
-                val onNavigateToNeuralNetwork: () -> Unit = remember(navController) { { navController.navigate("neural_network") } }
-                val onNavigateToSystem: () -> Unit = remember(navController) { { navController.navigate("system") } }
                 val onNavigateToTheme: () -> Unit = remember(navController) { { navController.navigate("theme_select") } }
                 val onNavigateToLocalStatus: () -> Unit = remember(navController) { { navController.navigate("local_status") } }
-                val onNavigateToHardwareMonitor: () -> Unit = remember(navController) { { navController.navigate("hardware_monitor") } }
-                val onNavigateToGradientDescent: () -> Unit = remember(navController) { { navController.navigate("gradient_descent") } }
-                val onNavigateToRemoteCommand: () -> Unit = remember(navController) { { navController.navigate("forge_remote") } }
+                val onNavigateToExperimental: () -> Unit = remember(navController) { { navController.navigate("experimental_settings") } }
                 SettingsScreen(
                     isLiteMode = isLiteMode,
                     isVoiceDominantMode = isVoiceDominantMode,
                     currentModelId = currentModel,
                     allPersonas = allPersonas,
-
                     onToggleLite = onToggleLite,
                     onToggleVoiceDominant = onToggleVoiceDominant,
                     onNavigateToModelSettings = onNavigateToModelSettings,
                     onNavigateToIP = onNavigateToIP,
-                    onNavigateToNeuralNetwork = onNavigateToNeuralNetwork,
-                    onNavigateToSystem = onNavigateToSystem,
                     onNavigateToTheme = onNavigateToTheme,
                     onNavigateToLocalStatus = onNavigateToLocalStatus,
-                    onNavigateToHardwareMonitor = onNavigateToHardwareMonitor,
-                    onNavigateToGradientDescent = onNavigateToGradientDescent,
-                    onNavigateToRemoteCommand = onNavigateToRemoteCommand,
-
+                    onNavigateToExperimental = onNavigateToExperimental,
                 )
             }
             composable("remote_ip_select") {
@@ -694,6 +683,15 @@ fun GeminiApp(viewModel: GeminiViewModel = viewModel(), intent: android.content.
                     remoteHostIp = remoteHost,
                     remotePort = remotePort,
                     onNavigateToRemoteSettings = { navController.navigate("remote_ip_select") }
+                )
+            }
+            composable("experimental_settings") {
+                ExperimentalSettingsScreen(
+                    onNavigateToSystem = { navController.navigate("system") },
+                    onNavigateToHardwareMonitor = { navController.navigate("hardware_monitor") },
+                    onNavigateToRemoteCommand = { navController.navigate("forge_remote") },
+                    onNavigateToGradientDescent = { navController.navigate("gradient_descent") },
+                    onNavigateToNeuralNetwork = { navController.navigate("neural_network") }
                 )
             }
 

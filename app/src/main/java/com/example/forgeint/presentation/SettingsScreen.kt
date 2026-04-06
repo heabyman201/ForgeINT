@@ -14,22 +14,17 @@ import androidx.compose.material.icons.filled.BroadcastOnPersonal
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.DeviceThermostat
 import androidx.compose.material.icons.filled.ShowChart
-import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.SaveAlt
 import androidx.compose.material.icons.filled.Search
-import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.WifiFind
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.foundation.focusable
 import androidx.compose.ui.Alignment
-import androidx.compose.runtime.derivedStateOf
 import androidx.wear.compose.material.Vignette
 import androidx.wear.compose.material.VignettePosition
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -42,12 +37,7 @@ import androidx.compose.ui.unit.dp
 import androidx.wear.compose.foundation.lazy.TransformingLazyColumn
 import androidx.wear.compose.foundation.lazy.items
 import androidx.wear.compose.foundation.lazy.rememberTransformingLazyColumnState
-import androidx.wear.compose.foundation.lazy.TransformingLazyColumnState
 import androidx.wear.compose.material3.ScrollIndicator
-import androidx.wear.compose.material.ScalingLazyColumn
-import androidx.wear.compose.material.ScalingLazyListState
-import androidx.wear.compose.material.rememberScalingLazyListState
-import androidx.wear.compose.material.PositionIndicator
 import androidx.wear.compose.material.Chip
 import androidx.wear.compose.material.ChipDefaults
 import androidx.wear.compose.material.Icon
@@ -58,27 +48,24 @@ import androidx.wear.compose.material.Switch
 import androidx.wear.compose.material.Text
 import androidx.wear.compose.material.ToggleChip
 import androidx.wear.compose.material.ToggleChipDefaults
-import com.example.weargemini.data.SettingsManager
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
-import androidx.wear.compose.material.CompactChip
 import androidx.compose.foundation.border
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.filled.Computer
 import androidx.compose.material.icons.filled.Memory
+import androidx.compose.material.icons.filled.Science
 import com.example.forgeint.presentation.theme.LocalForgeIntColors
 import androidx.compose.ui.input.rotary.onRotaryScrollEvent
 import kotlinx.coroutines.launch
 import androidx.compose.foundation.gestures.scrollBy
 import androidx.wear.compose.material3.Slider
 import androidx.wear.compose.material3.SliderDefaults
-import androidx.wear.compose.material.items as materialItems
 
 fun formatModelDisplayName(modelId: String): String {
     val rawName = modelId.substringAfter('/', "").substringBefore(':')
@@ -124,14 +111,9 @@ fun SettingsScreen(
     onToggleVoiceDominant: (Boolean) -> Unit,
     onNavigateToModelSettings: () -> Unit,
     onNavigateToIP: () -> Unit,
-    onNavigateToNeuralNetwork: () -> Unit,
-    onNavigateToSystem: () -> Unit,
-
     onNavigateToTheme: () -> Unit,
     onNavigateToLocalStatus: () -> Unit,
-    onNavigateToHardwareMonitor: () -> Unit,
-    onNavigateToGradientDescent: () -> Unit,
-    onNavigateToRemoteCommand: () -> Unit
+    onNavigateToExperimental: () -> Unit
 ) {
     val listState = rememberTransformingLazyColumnState()
     val context = LocalContext.current
@@ -358,103 +340,22 @@ fun SettingsScreen(
 //                    modifier = Modifier.fillMaxWidth()
 //                )
 //            }
-            item { SettingsSectionHeader("Device & Tools") }
-
+            item { SettingsSectionHeader("Advanced") }
             item {
                 Chip(
-                    onClick = onNavigateToSystem,
-                    label = { Text("System Monitor", color = colors.botText) },
+                    onClick = onNavigateToExperimental,
+                    label = { Text("Experimental Settings", color = colors.botText) },
                     secondaryLabel = {
                         Text(
-                            "Monitor RAM and Thermals",
+                            "Hardware monitor, remote control & demos",
                             maxLines = 2,
                             overflow = TextOverflow.Ellipsis,
                             color = colors.userText
                         )
                     },
-                    icon = { Icon(Icons.Default.DeviceThermostat, "System Monitor", tint = colors.primary) },
-                    colors = ChipDefaults.gradientBackgroundChipColors(
-                        startBackgroundColor = colors.userBubble,
-                        endBackgroundColor = colors.surface
-                    ),
-                    modifier = Modifier.fillMaxWidth()
-                )
-            }
-            item {
-                Chip(
-                    onClick = onNavigateToHardwareMonitor,
-                    label = { Text("Local Hardware Monitor", color = colors.botText) },
-                    secondaryLabel = {
-                        Text(
-                            "Monitor PC Stats",
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            color = colors.userText
-                        )
-                    },
-                    icon = { Icon(Icons.Default.Memory, "Hardware Monitor", tint = colors.primary) },
-                    colors = ChipDefaults.gradientBackgroundChipColors(
-                        startBackgroundColor = colors.userBubble,
-                        endBackgroundColor = colors.surface
-                    ),
-                    modifier = Modifier.fillMaxWidth()
-                )
-            }
-            item {
-                Chip(
-                    onClick = onNavigateToRemoteCommand,
-                    label = { Text("Remote Control", color = colors.botText) },
-                    secondaryLabel = {
-                        Text(
-                            "Send Flask commands to the hardcoded host",
-                            maxLines = 2,
-                            overflow = TextOverflow.Ellipsis,
-                            color = colors.userText
-                        )
-                    },
-                    icon = { Icon(Icons.Default.Computer, "Remote Control", tint = colors.replyIcon) },
+                    icon = { Icon(Icons.Default.Science, "Experimental", tint = colors.replyIcon) },
                     colors = ChipDefaults.gradientBackgroundChipColors(
                         startBackgroundColor = colors.botBubble,
-                        endBackgroundColor = colors.surface
-                    ),
-                    modifier = Modifier.fillMaxWidth()
-                )
-            }
-            item {
-                Chip(
-                    onClick = onNavigateToGradientDescent,
-                    label = { Text("Gradient Descent", color = colors.botText) },
-                    secondaryLabel = {
-                        Text(
-                            "Canvas Math Demo",
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            color = colors.userText
-                        )
-                    },
-                    icon = { Icon(Icons.Default.ShowChart, "Gradient Descent", tint = colors.primary) },
-                    colors = ChipDefaults.gradientBackgroundChipColors(
-                        startBackgroundColor = colors.userBubble,
-                        endBackgroundColor = colors.surface
-                    ),
-                    modifier = Modifier.fillMaxWidth()
-                )
-            }
-            item {
-                Chip(
-                    onClick = onNavigateToNeuralNetwork,
-                    label = { Text("Neural Network", color = colors.botText) },
-                    secondaryLabel = {
-                        Text(
-                            "Experimental math demo",
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            color = colors.userText
-                        )
-                    },
-                    icon = { Icon(Icons.Default.BroadcastOnPersonal, "Neural Network", tint = colors.replyIcon) },
-                    colors = ChipDefaults.gradientBackgroundChipColors(
-                        startBackgroundColor = colors.userBubble,
                         endBackgroundColor = colors.surface
                     ),
                     modifier = Modifier.fillMaxWidth()
@@ -469,7 +370,116 @@ fun SettingsScreen(
     }
 }
 @Composable
+fun ExperimentalSettingsScreen(
+    onNavigateToSystem: () -> Unit,
+    onNavigateToHardwareMonitor: () -> Unit,
+    onNavigateToRemoteCommand: () -> Unit,
+    onNavigateToGradientDescent: () -> Unit,
+    onNavigateToNeuralNetwork: () -> Unit
+) {
+    val listState = rememberTransformingLazyColumnState()
+    val coroutineScope = rememberCoroutineScope()
+    val focusRequester = remember { FocusRequester() }
+    val colors = LocalForgeIntColors.current
 
+    LaunchedEffect(Unit) { focusRequester.requestFocus() }
+
+    Scaffold(positionIndicator = { ScrollIndicator(state = listState) }) {
+        TransformingLazyColumn(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(colors.background)
+                .onRotaryScrollEvent {
+                    coroutineScope.launch { listState.scrollBy(it.verticalScrollPixels * 2f) }
+                    true
+                }
+                .focusRequester(focusRequester)
+                .focusable(),
+            state = listState,
+            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 40.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            item {
+                Text("Experimental", style = MaterialTheme.typography.title3, color = colors.botText)
+            }
+            item { SettingsSectionHeader("Device Monitoring") }
+            item {
+                Chip(
+                    onClick = onNavigateToSystem,
+                    label = { Text("System Monitor", color = colors.botText) },
+                    secondaryLabel = {
+                        Text("Monitor RAM and Thermals", maxLines = 2, overflow = TextOverflow.Ellipsis, color = colors.userText)
+                    },
+                    icon = { Icon(Icons.Default.DeviceThermostat, "System Monitor", tint = colors.primary) },
+                    colors = ChipDefaults.gradientBackgroundChipColors(
+                        startBackgroundColor = colors.userBubble, endBackgroundColor = colors.surface
+                    ),
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+            item {
+                Chip(
+                    onClick = onNavigateToHardwareMonitor,
+                    label = { Text("Local Hardware Monitor", color = colors.botText) },
+                    secondaryLabel = {
+                        Text("Monitor PC Stats", maxLines = 1, overflow = TextOverflow.Ellipsis, color = colors.userText)
+                    },
+                    icon = { Icon(Icons.Default.Memory, "Hardware Monitor", tint = colors.primary) },
+                    colors = ChipDefaults.gradientBackgroundChipColors(
+                        startBackgroundColor = colors.userBubble, endBackgroundColor = colors.surface
+                    ),
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+            item { SettingsSectionHeader("Remote Control") }
+            item {
+                Chip(
+                    onClick = onNavigateToRemoteCommand,
+                    label = { Text("Remote Control", color = colors.botText) },
+                    secondaryLabel = {
+                        Text("Send Flask commands to the hardcoded host", maxLines = 2, overflow = TextOverflow.Ellipsis, color = colors.userText)
+                    },
+                    icon = { Icon(Icons.Default.Computer, "Remote Control", tint = colors.replyIcon) },
+                    colors = ChipDefaults.gradientBackgroundChipColors(
+                        startBackgroundColor = colors.botBubble, endBackgroundColor = colors.surface
+                    ),
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+            item { SettingsSectionHeader("Demos") }
+            item {
+                Chip(
+                    onClick = onNavigateToGradientDescent,
+                    label = { Text("Gradient Descent", color = colors.botText) },
+                    secondaryLabel = {
+                        Text("Canvas Math Demo", maxLines = 1, overflow = TextOverflow.Ellipsis, color = colors.userText)
+                    },
+                    icon = { Icon(Icons.Default.ShowChart, "Gradient Descent", tint = colors.primary) },
+                    colors = ChipDefaults.gradientBackgroundChipColors(
+                        startBackgroundColor = colors.userBubble, endBackgroundColor = colors.surface
+                    ),
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+            item {
+                Chip(
+                    onClick = onNavigateToNeuralNetwork,
+                    label = { Text("Neural Network", color = colors.botText) },
+                    secondaryLabel = {
+                        Text("Experimental math demo", maxLines = 1, overflow = TextOverflow.Ellipsis, color = colors.userText)
+                    },
+                    icon = { Icon(Icons.Default.BroadcastOnPersonal, "Neural Network", tint = colors.replyIcon) },
+                    colors = ChipDefaults.gradientBackgroundChipColors(
+                        startBackgroundColor = colors.userBubble, endBackgroundColor = colors.surface
+                    ),
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+        }
+    }
+}
+
+@Composable
 fun MessageLengthSelectionScreen(
     selectedLength: String,
     onLengthSelected: (String) -> Unit

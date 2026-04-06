@@ -6,12 +6,12 @@ import com.example.forgeint.domain.Persona
 import com.google.gson.Gson
 import com.google.gson.reflect.TypeToken
 
-class CustomPersonaRepository(context: Context) {
+class CustomPersonaRepository(context: Context) : PersonaRepository<Persona> {
     private val prefs: SharedPreferences = context.getSharedPreferences("custom_personas", Context.MODE_PRIVATE)
     private val gson = Gson()
     private val KEY_CUSTOM_PERSONAS = "saved_custom_personas"
 
-    fun getCustomPersonas(): List<Persona> {
+    override fun getCustomPersonas(): List<Persona> {
         val json = prefs.getString(KEY_CUSTOM_PERSONAS, null) ?: return emptyList()
         val type = object : TypeToken<List<Persona>>() {}.type
         return try {
@@ -21,13 +21,13 @@ class CustomPersonaRepository(context: Context) {
         }
     }
 
-    fun addCustomPersona(persona: Persona) {
+    override fun addCustomPersona(persona: Persona) {
         val current = getCustomPersonas().toMutableList()
         current.add(persona)
         saveList(current)
     }
     
-    fun deleteCustomPersona(id: String) {
+    override fun deleteCustomPersona(id: String) {
         val current = getCustomPersonas().toMutableList()
         current.removeAll { it.id == id }
         saveList(current)

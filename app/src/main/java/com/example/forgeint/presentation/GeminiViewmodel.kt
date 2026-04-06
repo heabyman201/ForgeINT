@@ -5,10 +5,9 @@ import android.os.SystemClock
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.forgeint.BuildConfig
-import com.example.weargemini.data.SettingsManager
+import com.example.forgeint.data.PersonaRepository
 import com.google.gson.Gson
 import com.google.gson.annotations.SerializedName
-import com.google.gson.reflect.TypeToken
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.FlowPreview
@@ -36,7 +35,6 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import kotlin.math.sqrt
 import java.util.concurrent.TimeUnit
-import org.json.JSONArray
 import org.json.JSONObject
 
 enum class ConnectionMode {
@@ -51,13 +49,23 @@ data class PendingPcAction(
     val confirmLabel: String
 )
 
-class GeminiViewModel(application: Application) : AndroidViewModel(application) {
+class GeminiViewModel(
+    application: Application,
+    private val settingsManager: SettingsStore,
+    private val customPersonaRepository: PersonaRepository<Persona>
+) : AndroidViewModel(application) {
     companion object {
         private const val TAG = "GeminiViewModel"
         private const val STREAM_UI_FRAME_MS = 50L
         @Volatile private var nativeParserAvailable = false
         @Volatile private var nativeNumericOpsAvailable = false
     }
+
+    constructor(application: Application) : this(
+        application = application,
+        settingsManager = SettingsManager(application),
+        customPersonaRepository = com.example.forgeint.data.CustomPersonaRepository(application)
+    )
 
     init {
         val nativeLoaded = try {
@@ -197,9 +205,7 @@ class GeminiViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     private val dao = ChatDatabase.getDatabase(application).chatDao()
-    private val settingsManager = SettingsManager(application)
     private val traitDao = ChatDatabase.getDatabase(application)
-    private val customPersonaRepository = com.example.forgeint.data.CustomPersonaRepository(application)
 
     private val phoneCommunicator = PhoneCommunicator(application)
 
@@ -298,6 +304,10 @@ val autoPowerSavingThreshold = settingsManager.isAutoPowerSavingModeThreshold
         .stateIn(viewModelScope, SharingStarted.Eagerly, "default")
 
     private val _customPersonas = MutableStateFlow(customPersonaRepository.getCustomPersonas())
+
+    private fun refreshCustomPersonas() {
+        _customPersonas.value = customPersonaRepository.getCustomPersonas()
+    }
     
     val allPersonas = _customPersonas.map { custom ->
         Personas.list + custom
@@ -311,12 +321,12 @@ val autoPowerSavingThreshold = settingsManager.isAutoPowerSavingModeThreshold
             systemInstruction = prompt
         )
         customPersonaRepository.addCustomPersona(newPersona)
-        _customPersonas.value = customPersonaRepository.getCustomPersonas()
+        refreshCustomPersonas()
     }
 
     fun deletePersona(id: String) {
         customPersonaRepository.deleteCustomPersona(id)
-        _customPersonas.value = customPersonaRepository.getCustomPersonas()
+        refreshCustomPersonas()
         // If the deleted persona was selected, revert to default
         if (selectedPersonaId.value == id) {
              setPersona("default")

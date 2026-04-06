@@ -11,6 +11,11 @@ namespace {
 
 constexpr float kVectorNormalizeEpsilon = 1e-8f;
 constexpr float kCosineNormEpsilon = 1e-10f;
+// Caps scratch buffers so a large one-off call can't permanently bloat watch RAM.
+constexpr size_t kMaxScratchFloats  = 4096u; // 16 KB
+constexpr size_t kMaxScratchDoubles = 2048u; // 16 KB
+// Batch size for pinning JNI byte arrays: bounds GC pause while reducing transitions.
+constexpr jsize kScoreBatchSize = 8;
 
 inline bool isAsciiWhitespace(char c) {
     return c == ' ' || c == '\t' || c == '\n' || c == '\r';
@@ -116,14 +121,9 @@ double cosineSimilarityFloatBytesLE(
     double dot = 0.0;
     double normB = 0.0;
     for (size_t i = 0; i < size; ++i) {
-        const size_t base = i * 4u;
-        const uint32_t bits =
-                (static_cast<uint32_t>(bytes[base])) |
-                (static_cast<uint32_t>(bytes[base + 1]) << 8u) |
-                (static_cast<uint32_t>(bytes[base + 2]) << 16u) |
-                (static_cast<uint32_t>(bytes[base + 3]) << 24u);
-        float vb = 0.0f;
-        std::memcpy(&vb, &bits, sizeof(float));
+        // Galaxy Watch 5 is little-endian ARM: a single memcpy → one LDR.
+        float vb;
+        std::memcpy(&vb, &bytes[i * 4u], sizeof(float));
         const float va = a[i];
         dot += static_cast<double>(va) * static_cast<double>(vb);
         normB += static_cast<double>(vb) * static_cast<double>(vb);
@@ -271,10 +271,7 @@ Java_com_example_forgeint_presentation_GeminiViewModel_parseStreamChunkNative(
             pushChar('n');
             pushChar('n');
             pendingN = 0;
-            if (pendingN == 1) {
-                pushChar('n');
-                pendingN = 0;
-            } else if (c == 'n') {
+            if (c == 'n') {
                 pendingN = 1;
             } else {
                 pushChar(c);
@@ -324,9 +321,10 @@ Java_com_example_forgeint_presentation_GeminiViewModel_normalizeVectorNative(
 
     auto& scratch = floatScratchBuffer();
     const size_t size = static_cast<size_t>(len);
-    if (scratch.size() < size) {
-        scratch.resize(size);
+    if (scratch.capacity() > kMaxScratchFloats && size <= kMaxScratchFloats) {
+        scratch.shrink_to_fit();
     }
+    if (scratch.size() < size) scratch.resize(size);
     env->GetFloatArrayRegion(raw, 0, len, scratch.data());
     normalizeInPlace(scratch.data(), size);
     env->SetFloatArrayRegion(out, 0, len, scratch.data());
@@ -347,9 +345,10 @@ Java_com_example_forgeint_presentation_GeminiViewModel_cosineSimilarityNative(
 
     auto& scratch = floatScratchBuffer();
     const size_t totalSize = static_cast<size_t>(size) * 2u;
-    if (scratch.size() < totalSize) {
-        scratch.resize(totalSize);
+    if (scratch.capacity() > kMaxScratchFloats && totalSize <= kMaxScratchFloats) {
+        scratch.shrink_to_fit();
     }
+    if (scratch.size() < totalSize) scratch.resize(totalSize);
     float* va = scratch.data();
     float* vb = scratch.data() + size;
     env->GetFloatArrayRegion(a, 0, size, va);
@@ -445,44 +444,91 @@ Java_com_example_forgeint_presentation_GeminiViewModel_scoreMessageVectorsNative
     if (out == nullptr) return nullptr;
     if (queryLen <= 0 || itemCount <= 0) return out;
 
-    auto& queryScratch = floatScratchBuffer();
-    const size_t querySize = static_cast<size_t>(queryLen);
-    if (queryScratch.size() < querySize) {
-        queryScratch.resize(querySize);
+    // Pre-fetch all blob array refs and lengths before any critical section.
+    // GetObjectArrayElement / GetArrayLength are ordinary JNI calls and must
+    // NOT be issued while a critical pointer is held.
+    struct Slot { jbyteArray arr; const jbyte* ptr; jsize floatCount; };
+    std::vector<Slot> slots(static_cast<size_t>(itemCount));
+    for (jsize i = 0; i < itemCount; ++i) {
+        Slot& s = slots[static_cast<size_t>(i)];
+        s.arr        = static_cast<jbyteArray>(env->GetObjectArrayElement(vectorBlobs, i));
+        s.ptr        = nullptr;
+        s.floatCount = (s.arr != nullptr) ? env->GetArrayLength(s.arr) / 4 : 0;
     }
-    env->GetFloatArrayRegion(queryVector, 0, queryLen, queryScratch.data());
 
-    const double queryNormSq = squaredNorm(queryScratch.data(), querySize);
-    if (queryNormSq <= kCosineNormEpsilon) {
+    // Pin query vector directly — avoid a scratch copy and one float allocation.
+    const auto* queryPtr = static_cast<const jfloat*>(
+            env->GetPrimitiveArrayCritical(queryVector, nullptr));
+    if (queryPtr == nullptr) {
+        for (auto& s : slots) { if (s.arr) env->DeleteLocalRef(s.arr); }
         return out;
     }
 
+    const size_t querySize   = static_cast<size_t>(queryLen);
+    const double queryNormSq = squaredNorm(queryPtr, querySize);
+    if (queryNormSq <= kCosineNormEpsilon) {
+        env->ReleasePrimitiveArrayCritical(queryVector,
+                const_cast<jfloat*>(queryPtr), JNI_ABORT);
+        for (auto& s : slots) { if (s.arr) env->DeleteLocalRef(s.arr); }
+        return out;
+    }
+
+    // Scores scratch — trim if it ballooned from a previous large call.
     auto& scores = doubleScratchBuffer();
     const size_t scoreCount = static_cast<size_t>(itemCount);
-    if (scores.size() < scoreCount) {
-        scores.resize(scoreCount);
+    if (scores.capacity() > kMaxScratchDoubles && scoreCount <= kMaxScratchDoubles) {
+        scores.shrink_to_fit();
     }
+    if (scores.size() < scoreCount) scores.resize(scoreCount);
     std::fill_n(scores.data(), scoreCount, 0.0);
-    for (jsize i = 0; i < itemCount; ++i) {
-        auto* blob = static_cast<jbyteArray>(env->GetObjectArrayElement(vectorBlobs, i));
-        if (blob == nullptr) continue;
 
-        const jsize byteLen = env->GetArrayLength(blob);
-        const jsize floatCount = byteLen / 4;
-        if (floatCount > 0) {
-            auto* bytes = static_cast<const jbyte*>(env->GetPrimitiveArrayCritical(blob, nullptr));
-            if (bytes != nullptr) {
-                scores[static_cast<size_t>(i)] = cosineSimilarityFloatBytesLE(
-                        queryScratch.data(),
-                        querySize,
-                        queryNormSq,
-                        reinterpret_cast<const uint8_t*>(bytes),
-                        static_cast<size_t>(floatCount));
-                env->ReleasePrimitiveArrayCritical(blob, const_cast<jbyte*>(bytes), JNI_ABORT);
+    // Process blobs in batches of kScoreBatchSize.
+    // Each batch: pin all → compute all → unpin all.
+    // Only GetPrimitiveArrayCritical/Release are issued inside the critical window.
+    Slot batch[kScoreBatchSize];
+
+    for (jsize batchStart = 0; batchStart < itemCount; batchStart += kScoreBatchSize) {
+        const jsize batchEnd = std::min(batchStart + kScoreBatchSize, itemCount);
+        const jsize batchLen = batchEnd - batchStart;
+
+        // --- Pin phase (only critical calls; metadata already fetched) ---
+        for (jsize b = 0; b < batchLen; ++b) {
+            batch[b] = slots[static_cast<size_t>(batchStart + b)];
+            Slot& s  = batch[b];
+            s.ptr    = nullptr;
+            if (s.arr != nullptr && s.floatCount > 0) {
+                s.ptr = static_cast<const jbyte*>(
+                        env->GetPrimitiveArrayCritical(s.arr, nullptr));
             }
         }
-        env->DeleteLocalRef(blob);
+
+        // --- Compute phase (all pinned, no JNI calls) ---
+        for (jsize b = 0; b < batchLen; ++b) {
+            const Slot& s = batch[b];
+            if (s.ptr != nullptr) {
+                scores[static_cast<size_t>(batchStart + b)] =
+                        cosineSimilarityFloatBytesLE(
+                                queryPtr, querySize, queryNormSq,
+                                reinterpret_cast<const uint8_t*>(s.ptr),
+                                static_cast<size_t>(s.floatCount));
+            }
+        }
+
+        // --- Unpin phase (critical release only; no ordinary JNI here) ---
+        for (jsize b = 0; b < batchLen; ++b) {
+            Slot& s = batch[b];
+            if (s.ptr != nullptr) {
+                env->ReleasePrimitiveArrayCritical(
+                        s.arr, const_cast<jbyte*>(s.ptr), JNI_ABORT);
+            }
+        }
     }
+
+    env->ReleasePrimitiveArrayCritical(queryVector,
+            const_cast<jfloat*>(queryPtr), JNI_ABORT);
+
+    // Delete local refs now that we are outside all critical sections.
+    for (auto& s : slots) { if (s.arr) env->DeleteLocalRef(s.arr); }
 
     env->SetDoubleArrayRegion(out, 0, itemCount, scores.data());
     return out;

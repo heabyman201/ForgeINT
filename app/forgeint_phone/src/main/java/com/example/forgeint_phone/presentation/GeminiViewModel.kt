@@ -5,7 +5,9 @@ import android.os.SystemClock
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.forgeint.BuildConfig
+import com.example.forgeint.data.PersonaRepository
 import com.example.forgeint.data.SettingsManager
+import com.example.forgeint.data.SettingsStore
 import com.google.gson.Gson
 import com.google.gson.annotations.SerializedName
 import kotlinx.coroutines.Dispatchers
@@ -57,13 +59,23 @@ enum class LocalModelStatus {
     Present
 }
 
-class GeminiViewModel(application: Application) : AndroidViewModel(application) {
+class GeminiViewModel(
+    application: Application,
+    private val settingsManager: SettingsStore,
+    private val customPersonaRepository: PersonaRepository<com.example.forgeint.domain.Persona>
+) : AndroidViewModel(application) {
     companion object {
         private const val TAG = "GeminiViewModel"
         private const val STREAM_UI_FRAME_MS = 50L
         @Volatile private var nativeParserAvailable = false
         @Volatile private var nativeNumericOpsAvailable = false
     }
+
+    constructor(application: Application) : this(
+        application = application,
+        settingsManager = SettingsManager(application),
+        customPersonaRepository = com.example.forgeint.data.CustomPersonaRepository(application)
+    )
 
     init {
         val nativeLoaded = try {
@@ -182,9 +194,7 @@ class GeminiViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     private val dao = ChatDatabase.getDatabase(application).chatDao()
-    private val settingsManager = SettingsManager(application)
     private val traitDao = ChatDatabase.getDatabase(application)
-    private val customPersonaRepository = com.example.forgeint.data.CustomPersonaRepository(application)
 
     private val localEngine = LocalInferenceEngine(application)
     private var isModelLoaded = false
@@ -205,6 +215,10 @@ class GeminiViewModel(application: Application) : AndroidViewModel(application) 
     val availableModels = _availableModels.asStateFlow()
 
     private val _customPersonas = MutableStateFlow(customPersonaRepository.getCustomPersonas())
+
+    private fun refreshCustomPersonas() {
+        _customPersonas.value = customPersonaRepository.getCustomPersonas()
+    }
 
     private fun gzipRequestBody(body: RequestBody): RequestBody = object : RequestBody() {
         override fun contentType() = body.contentType()
@@ -230,12 +244,12 @@ class GeminiViewModel(application: Application) : AndroidViewModel(application) 
             systemInstruction = prompt
         )
         customPersonaRepository.addCustomPersona(newPersona)
-        _customPersonas.value = customPersonaRepository.getCustomPersonas()
+        refreshCustomPersonas()
     }
 
     fun deletePersona(id: String) {
         customPersonaRepository.deleteCustomPersona(id)
-        _customPersonas.value = customPersonaRepository.getCustomPersonas()
+        refreshCustomPersonas()
         // If the deleted persona was selected, revert to default
         if (selectedPersonaId.value == id) {
              setPersona("default")
@@ -494,28 +508,12 @@ fun toggleMemoryMonitor() {
         }
     }
 
-    private data class LocalConnectivityConfig(
-        val localEnabled: Boolean,
-        val host: String,
-        val port: String,
-        val funnelEnabled: Boolean,
-        val token: String
-    )
-
     private fun observeLocalConnectivityConfig() {
         viewModelScope.launch {
-            combine(
-                isLocalEnabled,
-                currentHostIp,
-                currentPort,
-                isFunnelEnabled,
-                localAuthToken
-            ) { localEnabled, host, port, funnel, token ->
-                LocalConnectivityConfig(localEnabled, host, port, funnel, token)
-            }
+            settingsManager.localConnectivitySettings
                 .debounce(850)
                 .collect { cfg ->
-                    if (cfg.localEnabled) autoConnectLocalServer(silent = true)
+                    if (cfg.isLocalEnabled) autoConnectLocalServer(silent = true)
                 }
         }
     }

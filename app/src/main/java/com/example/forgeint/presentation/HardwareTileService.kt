@@ -20,7 +20,6 @@ import androidx.wear.tiles.TileBuilders.Tile
 import androidx.wear.tiles.TileService
 import androidx.wear.tiles.TimelineBuilders.Timeline
 import androidx.wear.tiles.TimelineBuilders.TimelineEntry
-import com.example.weargemini.data.SettingsManager
 import com.google.common.util.concurrent.Futures
 import com.google.common.util.concurrent.ListenableFuture
 import com.google.common.util.concurrent.SettableFuture
@@ -44,44 +43,13 @@ class HardwareTileService : TileService() {
             try {
                 val deviceParams = requestParams.deviceConfiguration
                 val settingsManager = SettingsManager(this@HardwareTileService)
-                
-                // 1. Resolve Host/Port
-                val host = settingsManager.hardwareHostIp.first()
-                val hardwarePort = settingsManager.hardwarePort.first()
-                val localAuthToken = settingsManager.localAuthToken.first()
-                val isFunnelEnabled = settingsManager.isFunnelEnabled.first()
-                val cleanHost = host.removePrefix("https://").removePrefix("http://").trim('/')
-                val isTunnel =
-                    isFunnelEnabled ||
-                    cleanHost.endsWith(".ts.net", ignoreCase = true) ||
-                    cleanHost.contains("cloudflare", ignoreCase = true) ||
-                    cleanHost.contains("ngrok", ignoreCase = true) ||
-                    cleanHost.contains("loclx", ignoreCase = true)
-                val hostWithoutPort = cleanHost.substringBefore(":")
-                val resolvedHardwarePort = hardwarePort.trim().ifBlank { "8080" }
-
-                val baseUrl = if (isTunnel) {
-                    "https://$cleanHost/"
-                } else {
-                    "http://$hostWithoutPort:${resolvedHardwarePort}/"
-                }
-
-                val headers = buildMap {
-                    if (localAuthToken.isNotBlank()) {
-                        put("Authorization", "Bearer ${localAuthToken.trim()}")
-                    }
-                    if (isTunnel) {
-                        put("User-Agent", "ForgeIntApp")
-                        put("cf-terminate-connection", "true")
-                        if (cleanHost.contains("ngrok", ignoreCase = true)) {
-                            put("ngrok-skip-browser-warning", "true")
-                        }
-                    }
-                }
+                val hardwareEndpoint = settingsManager.hardwareEndpointSettings.first()
+                val baseUrl = hardwareEndpoint.baseUrl(defaultPort = "8080")
+                val headers = hardwareEndpoint.defaultHeaders()
 
                 // 2. Fetch Data
                 val api = HardwareApi.create(baseUrl, headers)
-                val repo = HardwareRepository(api, baseUrl, localAuthToken)
+                val repo = HardwareRepository(api, baseUrl, hardwareEndpoint.authToken)
                 val stats = repo.fetchG14Status() // Returns valid stats or stats with errorMessage
 
                 // 3. Logic

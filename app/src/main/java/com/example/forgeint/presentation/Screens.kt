@@ -12,7 +12,6 @@ import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.ui.draw.rotate
 import android.content.Context
 import android.os.BatteryManager
-import android.os.PowerManager
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.padding
@@ -23,13 +22,10 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.Modifier
 import androidx.wear.compose.material.Text
 import kotlinx.coroutines.delay
-import androidx.compose.foundation.background
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.ui.platform.LocalDensity
-import androidx.compose.runtime.*
 import androidx.compose.ui.text.drawText
 import androidx.compose.ui.text.font.FontFamily
-import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlin.math.exp
 import android.app.RemoteInput
@@ -43,7 +39,6 @@ import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.infiniteRepeatable
-import androidx.compose.animation.core.keyframes
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
@@ -53,14 +48,12 @@ import androidx.compose.foundation.focusable
 import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -110,9 +103,7 @@ import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
 import android.speech.RecognitionListener
 import android.speech.SpeechRecognizer
-import java.util.Locale
 import androidx.compose.runtime.DisposableEffect
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.TextStyle
@@ -143,7 +134,6 @@ import androidx.wear.compose.material.Scaffold
 import androidx.wear.compose.material.ScalingLazyColumn
 import androidx.wear.compose.material.ScalingLazyListState
 import androidx.wear.compose.material.Switch
-import androidx.wear.compose.material.Text
 import androidx.wear.compose.material.TimeText
 import androidx.wear.compose.material.TitleCard
 import androidx.wear.compose.material.ToggleButton
@@ -156,54 +146,21 @@ import androidx.wear.compose.material.rememberScalingLazyListState
 import androidx.wear.compose.material3.IconButton
 import androidx.wear.compose.material3.ScrollIndicator
 import androidx.wear.input.RemoteInputIntentHelper
-import com.example.weargemini.data.SettingsManager
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.conflate
 import kotlinx.coroutines.flow.filterNotNull
-import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import android.graphics.BlurMaskFilter
-import androidx.compose.animation.core.LinearEasing
-import androidx.compose.animation.core.animateFloat
-import androidx.compose.animation.core.infiniteRepeatable
-import androidx.compose.animation.core.rememberInfiniteTransition
-import androidx.compose.animation.core.tween
-import androidx.compose.foundation.Canvas
-import androidx.compose.foundation.layout.fillMaxSize
-
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.remember
-
-import androidx.compose.ui.draw.rotate
 
 import androidx.compose.ui.graphics.Paint
-import androidx.compose.ui.graphics.PaintingStyle
 
 import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
 
 import android.graphics.SweepGradient
-import androidx.compose.animation.core.LinearEasing
-import androidx.compose.animation.core.animateFloat
-import androidx.compose.animation.core.infiniteRepeatable
-import androidx.compose.animation.core.rememberInfiniteTransition
-import androidx.compose.animation.core.tween
-import androidx.compose.foundation.Canvas
-import androidx.compose.foundation.layout.fillMaxSize
 
-import androidx.compose.runtime.getValue
-
-import androidx.compose.ui.draw.rotate
-
-import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.graphics.toArgb
-import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.dp
 import android.speech.RecognizerIntent
-import androidx.activity.compose.rememberLauncherForActivityResult
 
 import androidx.compose.material.icons.filled.Mic
 import androidx.core.content.ContextCompat
@@ -3405,7 +3362,7 @@ fun ConnectionSettingsScreen(
 
             item {
                 ListHeader {
-                    Text("Hardware Endpoint", color = colors.settingsIcon)
+                    Text("Hardware Monitor Endpoint", color = colors.settingsIcon)
                 }
             }
 
