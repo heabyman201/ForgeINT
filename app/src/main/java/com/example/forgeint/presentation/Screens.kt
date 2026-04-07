@@ -827,9 +827,18 @@ fun DetailedChatScreen(
     val rawModelName by settingsManager.selectedModel.collectAsStateWithLifecycle(initialValue = "")
     val colors = LocalForgeIntColors.current
     var isVoiceActive by remember { mutableStateOf(false) }
+    var isListening by remember { mutableStateOf(false) }
+    var partialTranscript by remember { mutableStateOf("") }
+    var inlineSpeechRecognizer by remember { mutableStateOf<SpeechRecognizer?>(null) }
+    val isMicPermissionGranted = remember {
+        mutableStateOf(
+            ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) ==
+                PackageManager.PERMISSION_GRANTED
+        )
+    }
     val coroutineScope = rememberCoroutineScope()
     val isThinking by isThinkingFlow.collectAsStateWithLifecycle()
-    
+
     val voiceLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.StartActivityForResult()
     ) { result ->
@@ -842,6 +851,21 @@ fun DetailedChatScreen(
         }
     }
 
+    val inlineMicPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        isMicPermissionGranted.value = granted
+        if (granted && SpeechRecognizer.isRecognitionAvailable(context)) {
+            partialTranscript = ""
+            val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+                putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+                putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
+                putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
+            }
+            inlineSpeechRecognizer?.startListening(intent)
+        }
+    }
+
     val triggerVoiceInput = {
         isVoiceActive = true
         val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
@@ -849,6 +873,51 @@ fun DetailedChatScreen(
             putExtra(RecognizerIntent.EXTRA_PROMPT, "Speak to Assistant")
         }
         voiceLauncher.launch(intent)
+    }
+
+    // Inline SpeechRecognizer for non-voice-dominant mic button
+    DisposableEffect(context) {
+        if (!SpeechRecognizer.isRecognitionAvailable(context)) {
+            onDispose { }
+        } else {
+            val recognizer = SpeechRecognizer.createSpeechRecognizer(context)
+            recognizer.setRecognitionListener(object : RecognitionListener {
+                override fun onReadyForSpeech(params: Bundle?) { isListening = true }
+                override fun onBeginningOfSpeech() { isListening = true }
+                override fun onRmsChanged(rmsdB: Float) = Unit
+                override fun onBufferReceived(buffer: ByteArray?) = Unit
+                override fun onEndOfSpeech() { isListening = false }
+                override fun onError(error: Int) {
+                    isListening = false
+                    partialTranscript = ""
+                }
+                override fun onResults(results: Bundle?) {
+                    isListening = false
+                    val spokenText = results
+                        ?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                        ?.firstOrNull()
+                        ?.trim()
+                        .orEmpty()
+                    partialTranscript = ""
+                    if (spokenText.isNotEmpty()) {
+                        onVoiceResult(spokenText)
+                    }
+                }
+                override fun onPartialResults(partialResults: Bundle?) {
+                    partialTranscript = partialResults
+                        ?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                        ?.firstOrNull()
+                        .orEmpty()
+                }
+                override fun onEvent(eventType: Int, params: Bundle?) = Unit
+            })
+            inlineSpeechRecognizer = recognizer
+            onDispose {
+                recognizer.cancel()
+                recognizer.destroy()
+                inlineSpeechRecognizer = null
+            }
+        }
     }
 
     // --- TTS Logic ---
@@ -1195,19 +1264,27 @@ fun DetailedChatScreen(
                                 .weight(1f)
                                 .height(43.dp)
                                 .clip(RoundedCornerShape(24.dp))
-                                .background(Color(0xFF1B1B1B))
+                                .background(if (isListening) colors.primary.copy(alpha = 0.15f) else Color(0xFF1B1B1B))
                                 .border(
-                                    border = BorderStroke(1.dp, colors.primary.copy(alpha = 0.35f)),
+                                    border = BorderStroke(1.dp, if (isListening) colors.primary else colors.primary.copy(alpha = 0.35f)),
                                     shape = RoundedCornerShape(24.dp)
                                 )
-                                .clickable(onClick = onReplyClick)
+                                .clickable {
+                                    if (isListening) {
+                                        inlineSpeechRecognizer?.cancel()
+                                        isListening = false
+                                        partialTranscript = ""
+                                    } else {
+                                        onReplyClick()
+                                    }
+                                }
                                 .padding(horizontal = 12.dp),
                             contentAlignment = Alignment.CenterStart
                         ) {
                             Text(
-                                text = "Type a reply...",
+                                text = if (isListening) partialTranscript.ifEmpty { "Listening..." } else "Type a reply...",
                                 style = MaterialTheme.typography.caption2,
-                                color = Color(0xFFAFAFAF),
+                                color = if (isListening) colors.primary else Color(0xFFAFAFAF),
                                 maxLines = 1
                             )
                         }
@@ -1216,24 +1293,34 @@ fun DetailedChatScreen(
                             modifier = Modifier
                                 .size(38.dp)
                                 .clip(CircleShape)
-                                .background(colors.surface)
+                                .background(if (isListening) colors.primary.copy(alpha = 0.3f) else colors.surface)
                                 .clickable {
                                     if (isGenerating) {
                                         onStopResponse()
+                                    } else if (isListening) {
+                                        inlineSpeechRecognizer?.cancel()
+                                        isListening = false
+                                        partialTranscript = ""
                                     } else {
-                                        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-                                            putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-                                            putExtra(RecognizerIntent.EXTRA_PROMPT, "Speak to $displayName")
+                                        if (!isMicPermissionGranted.value) {
+                                            inlineMicPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                                        } else if (SpeechRecognizer.isRecognitionAvailable(context)) {
+                                            partialTranscript = ""
+                                            val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+                                                putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+                                                putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
+                                                putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
+                                            }
+                                            inlineSpeechRecognizer?.startListening(intent)
                                         }
-                                        voiceLauncher.launch(intent)
                                     }
                                 },
                             contentAlignment = Alignment.Center
                         ) {
                             Icon(
                                 imageVector = if (isGenerating) Icons.Default.Stop else Icons.Default.Mic,
-                                contentDescription = if (isGenerating) "Stop Response" else "Voice Reply",
-                                tint = if (isGenerating) Color.Red else colors.primary,
+                                contentDescription = if (isGenerating) "Stop Response" else if (isListening) "Stop Listening" else "Voice Reply",
+                                tint = if (isGenerating) Color.Red else if (isListening) Color.White else colors.primary,
                                 modifier = Modifier.size(18.dp)
                             )
                         }
@@ -2062,6 +2149,7 @@ private fun StreamingLoadingOverlay(
     }
 }
 
+
 @Composable
 fun VoicePulseEffect(
     color: Color,
@@ -2686,6 +2774,7 @@ fun LiteChatScreen(
     val onSwapModelClickState by rememberUpdatedState(onSwapModelClick)
     val onWebsearchClickState by rememberUpdatedState(onWebsearchClick)
     val onVoiceResultState by rememberUpdatedState(onVoiceResult)
+    val onStopResponseState by rememberUpdatedState(onStopResponse)
     var isVoiceActive by remember { mutableStateOf(false) }
 
     val voiceLauncher = rememberLauncherForActivityResult(
@@ -2716,13 +2805,11 @@ fun LiteChatScreen(
     }
     val focusRequester = remember { FocusRequester() }
 
-
     LaunchedEffect(Unit) {
         focusRequester.requestFocus()
     }
     Scaffold(
         positionIndicator = { PositionIndicator(scalingLazyListState = listState) }
-        // No TimeText, No Vignette
     ) {
         ScalingLazyColumn(
             modifier = Modifier.fillMaxSize().background(colors.background)
@@ -2742,200 +2829,272 @@ fun LiteChatScreen(
             }
 
             if (isTyping) {
-                item {
-                    if (isWebSearching) {
-                        LiteWebSearchIndicator(colors = colors)
-                    } else {
-                        LiteTypingIndicator(colors = colors)
-                    }
+                item(key = "streaming_bubble") {
+                    LiteStreamingBubble(
+                        streamingMessageFlow = streamingMessageFlow,
+                        isWebSearching = isWebSearching,
+                        colors = colors
+                    )
                 }
             }
 
             if (isVoiceDominant) {
-                item {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(vertical = 8.dp),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        if (isVoiceActive) {
-                            VoicePulseEffect(
-                                color = colors.primary,
-                                modifier = Modifier.size(64.dp)
-                            )
-                        }
-                        Box(
-                            modifier = Modifier
-                                .size(64.dp)
-                                .clip(CircleShape)
-                                .background(colors.primary)
-                                .clickable {
-                                    if (isTyping) onStopResponse() else triggerVoiceInput()
-                                },
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Icon(
-                                if (isTyping) Icons.Default.Stop else Icons.Default.Mic,
-                                contentDescription = if (isTyping) "Stop Response" else "Voice Input",
-                                tint = Color.Black,
-                                modifier = Modifier.size(32.dp)
-                            )
-                        }
-                    }
+                item(key = "voice_button") {
+                    LiteVoiceButton(
+                        isVoiceActive = isVoiceActive,
+                        isTyping = isTyping,
+                        colors = colors,
+                        onStopResponse = { onStopResponseState() },
+                        onVoiceInput = { triggerVoiceInput() }
+                    )
                 }
-                item {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 6.dp, vertical = 4.dp),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        Row(
-                            modifier = Modifier
-                                .weight(1f)
-                                .height(34.dp)
-                                .clip(CircleShape)
-                                .background(colors.replyIcon)
-                                .clickable(onClick = onReplyClickState),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.Center
-                        ) {
-                            Icon(Icons.Default.Keyboard, null, tint = Color.Black, modifier = Modifier.size(14.dp))
-                            Spacer(Modifier.width(2.dp))
-                            Text("Keyboard", color = Color.Black, style = MaterialTheme.typography.caption2, maxLines = 1)
-                        }
-                        Row(
-                            modifier = Modifier
-                                .weight(1f)
-                                .height(34.dp)
-                                .clip(CircleShape)
-                                .background(colors.primary)
-                                .clickable(onClick = onSwapModelClickState),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.Center
-                        ) {
-                            Icon(Icons.Default.AutoAwesome, null, tint = Color.Black, modifier = Modifier.size(14.dp))
-                            Spacer(Modifier.width(2.dp))
-                            Text("Model", color = Color.Black, style = MaterialTheme.typography.caption2, maxLines = 1)
-                        }
-                    }
+                item(key = "voice_actions") {
+                    LiteCompactActionRow(
+                        colors = colors,
+                        onReplyClick = { onReplyClickState() },
+                        onSwapModelClick = { onSwapModelClickState() }
+                    )
                 }
-                item {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(34.dp)
-                            .padding(horizontal = 6.dp, vertical = 2.dp)
-                            .clip(CircleShape)
-                            .background(
-                                if (isWebSearchEnabled) colors.primary.copy(alpha = 0.82f)
-                                else colors.surface
-                            )
-                            .border(
-                                width = 1.dp,
-                                color = if (isWebSearchEnabled) colors.primary else Color.Gray,
-                                shape = CircleShape
-                            )
-                            .clickable(onClick = onWebsearchClickState),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.Center
-                    ) {
-                        Icon(Icons.Default.Web, null, tint = Color.Black, modifier = Modifier.size(14.dp))
-                        Spacer(Modifier.width(4.dp))
-                        Text(
-                            if (isWebSearchEnabled) "Web Search On" else "Web Search Off",
-                            color = Color.Black,
-                            style = MaterialTheme.typography.caption2,
-                            maxLines = 1
-                        )
-                    }
+                item(key = "voice_websearch") {
+                    LiteWebSearchToggle(
+                        isWebSearchEnabled = isWebSearchEnabled,
+                        compact = true,
+                        colors = colors,
+                        onClick = { onWebsearchClickState() }
+                    )
                 }
             } else {
-                item {
-
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(42.dp)
-                            .clip(CircleShape)
-                            .background(colors.replyIcon)
-                            .clickable(onClick = onReplyClickState),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.Center
-                    ) {
-                        Icon(Icons.Default.Keyboard, null, tint = Color.Black)
-                        Spacer(Modifier.width(6.dp))
-                        Text("Reply", color = Color.Black, style = MaterialTheme.typography.button)
-                    }
+                item(key = "reply_button") {
+                    LiteActionButton(
+                        icon = Icons.Default.Keyboard,
+                        label = "Reply",
+                        backgroundColor = colors.replyIcon,
+                        onClick = { onReplyClickState() }
+                    )
                 }
-                item {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(42.dp)
-                            .padding(top = 4.dp)
-                            .clip(CircleShape)
-                            .background(colors.primary)
-                            .clickable(onClick = onSwapModelClickState),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.Center
-                    ) {
-                        Icon(Icons.Default.AutoAwesome, null, tint = Color.Black)
-                        Spacer(Modifier.width(6.dp))
-                        Text("Change Model", color = Color.Black, style = MaterialTheme.typography.button)
-                    }
+                item(key = "model_button") {
+                    LiteActionButton(
+                        icon = Icons.Default.AutoAwesome,
+                        label = "Change Model",
+                        backgroundColor = colors.primary,
+                        modifier = Modifier.padding(top = 4.dp),
+                        onClick = { onSwapModelClickState() }
+                    )
                 }
-                item {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(42.dp)
-                            .padding(top = 4.dp)
-                            .clip(CircleShape)
-                            .background(
-                                if (isWebSearchEnabled) colors.primary.copy(alpha = 0.82f)
-                                else colors.surface
-                            )
-                            .border(
-                                width = 1.dp,
-                                color = if (isWebSearchEnabled) colors.primary else Color.Gray,
-                                shape = CircleShape
-                            )
-                            .clickable(onClick = onWebsearchClickState),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.Center
-                    ) {
-                        Icon(Icons.Default.Web, null, tint = Color.Black)
-                        Spacer(Modifier.width(6.dp))
-                        Text(
-                            if (isWebSearchEnabled) "Web Search On" else "Web Search Off",
-                            color = Color.Black,
-                            style = MaterialTheme.typography.button
-                        )
-                    }
+                item(key = "websearch_button") {
+                    LiteWebSearchToggle(
+                        isWebSearchEnabled = isWebSearchEnabled,
+                        compact = false,
+                        colors = colors,
+                        modifier = Modifier.padding(top = 4.dp),
+                        onClick = { onWebsearchClickState() }
+                    )
                 }
             }
 
-            item {
-
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(42.dp)
-                        .padding(top = 4.dp)
-                        .clip(CircleShape)
-                        .background(Color.Red)
-                        .clickable(onClick = onDeleteClickState),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.Center
-                ) {
-                    Icon(Icons.Default.Delete, null, tint = Color.Black)
-                    Spacer(Modifier.width(6.dp))
-                    Text("Delete Chat", color = Color.Black, style = MaterialTheme.typography.button)
-                }
+            item(key = "delete_button") {
+                LiteActionButton(
+                    icon = Icons.Default.Delete,
+                    label = "Delete Chat",
+                    backgroundColor = Color.Red,
+                    modifier = Modifier.padding(top = 4.dp),
+                    onClick = { onDeleteClickState() }
+                )
             }
         }
+    }
+}
+
+@Composable
+private fun LiteStreamingBubble(
+    streamingMessageFlow: StateFlow<String?>,
+    isWebSearching: Boolean,
+    colors: com.example.forgeint.presentation.theme.ForgeIntColors
+) {
+    if (isWebSearching) {
+        LiteWebSearchIndicator(colors = colors)
+        return
+    }
+    val streamingText by streamingMessageFlow.collectAsStateWithLifecycle()
+    if (streamingText != null) {
+        val bubbleShape = remember {
+            RoundedCornerShape(14.dp, 14.dp, 14.dp, 3.dp)
+        }
+        val bubbleBrush = remember(colors.botBubble, colors.surface) {
+            Brush.linearGradient(
+                listOf(
+                    colors.botBubble.copy(alpha = 0.96f),
+                    colors.surface.copy(alpha = 0.88f)
+                )
+            )
+        }
+        Box(modifier = Modifier.fillMaxWidth(), contentAlignment = Alignment.CenterStart) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth(0.95f)
+                    .clip(bubbleShape)
+                    .background(bubbleBrush)
+                    .padding(horizontal = 10.dp, vertical = 8.dp)
+            ) {
+                Text(
+                    text = "Forge",
+                    color = colors.botText.copy(alpha = 0.75f),
+                    style = MaterialTheme.typography.caption3
+                )
+                Spacer(Modifier.height(2.dp))
+                Text(
+                    text = streamingText ?: "",
+                    color = colors.botText,
+                    style = MaterialTheme.typography.body2
+                )
+            }
+        }
+    } else {
+        LiteTypingIndicator(colors = colors)
+    }
+}
+
+@Composable
+private fun LiteVoiceButton(
+    isVoiceActive: Boolean,
+    isTyping: Boolean,
+    colors: com.example.forgeint.presentation.theme.ForgeIntColors,
+    onStopResponse: () -> Unit,
+    onVoiceInput: () -> Unit
+) {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 8.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        if (isVoiceActive) {
+            VoicePulseEffect(
+                color = colors.primary,
+                modifier = Modifier.size(64.dp)
+            )
+        }
+        Box(
+            modifier = Modifier
+                .size(64.dp)
+                .clip(CircleShape)
+                .background(colors.primary)
+                .clickable { if (isTyping) onStopResponse() else onVoiceInput() },
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(
+                if (isTyping) Icons.Default.Stop else Icons.Default.Mic,
+                contentDescription = if (isTyping) "Stop Response" else "Voice Input",
+                tint = Color.Black,
+                modifier = Modifier.size(32.dp)
+            )
+        }
+    }
+}
+
+@Composable
+private fun LiteCompactActionRow(
+    colors: com.example.forgeint.presentation.theme.ForgeIntColors,
+    onReplyClick: () -> Unit,
+    onSwapModelClick: () -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 6.dp, vertical = 4.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        Row(
+            modifier = Modifier
+                .weight(1f)
+                .height(34.dp)
+                .clip(CircleShape)
+                .background(colors.replyIcon)
+                .clickable(onClick = onReplyClick),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.Center
+        ) {
+            Icon(Icons.Default.Keyboard, null, tint = Color.Black, modifier = Modifier.size(14.dp))
+            Spacer(Modifier.width(2.dp))
+            Text("Keyboard", color = Color.Black, style = MaterialTheme.typography.caption2, maxLines = 1)
+        }
+        Row(
+            modifier = Modifier
+                .weight(1f)
+                .height(34.dp)
+                .clip(CircleShape)
+                .background(colors.primary)
+                .clickable(onClick = onSwapModelClick),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.Center
+        ) {
+            Icon(Icons.Default.AutoAwesome, null, tint = Color.Black, modifier = Modifier.size(14.dp))
+            Spacer(Modifier.width(2.dp))
+            Text("Model", color = Color.Black, style = MaterialTheme.typography.caption2, maxLines = 1)
+        }
+    }
+}
+
+@Composable
+private fun LiteActionButton(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    label: String,
+    backgroundColor: Color,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit
+) {
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .height(42.dp)
+            .clip(CircleShape)
+            .background(backgroundColor)
+            .clickable(onClick = onClick),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.Center
+    ) {
+        Icon(icon, null, tint = Color.Black)
+        Spacer(Modifier.width(6.dp))
+        Text(label, color = Color.Black, style = MaterialTheme.typography.button)
+    }
+}
+
+@Composable
+private fun LiteWebSearchToggle(
+    isWebSearchEnabled: Boolean,
+    compact: Boolean,
+    colors: com.example.forgeint.presentation.theme.ForgeIntColors,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit
+) {
+    val bgColor = if (isWebSearchEnabled) colors.primary.copy(alpha = 0.82f) else colors.surface
+    val borderColor = if (isWebSearchEnabled) colors.primary else Color.Gray
+    val height = if (compact) 34.dp else 42.dp
+    val textStyle = if (compact) MaterialTheme.typography.caption2 else MaterialTheme.typography.button
+    val iconSize = if (compact) Modifier.size(14.dp) else Modifier
+    val hPadding = if (compact) 6.dp else 0.dp
+    val vPadding = if (compact) 2.dp else 0.dp
+
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .height(height)
+            .padding(horizontal = hPadding, vertical = vPadding)
+            .clip(CircleShape)
+            .background(bgColor)
+            .border(width = 1.dp, color = borderColor, shape = CircleShape)
+            .clickable(onClick = onClick),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.Center
+    ) {
+        Icon(Icons.Default.Web, null, tint = Color.Black, modifier = iconSize)
+        Spacer(Modifier.width(if (compact) 4.dp else 6.dp))
+        Text(
+            if (isWebSearchEnabled) "Web Search On" else "Web Search Off",
+            color = Color.Black,
+            style = textStyle,
+            maxLines = 1
+        )
     }
 }
 
