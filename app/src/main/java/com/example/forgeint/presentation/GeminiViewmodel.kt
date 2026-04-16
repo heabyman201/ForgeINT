@@ -35,6 +35,9 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import kotlin.math.sqrt
 import java.util.concurrent.TimeUnit
+import java.util.Date
+import java.util.Locale
+import java.text.SimpleDateFormat
 import org.json.JSONObject
 
 enum class ConnectionMode {
@@ -1834,12 +1837,15 @@ val autoPowerSavingThreshold = settingsManager.isAutoPowerSavingModeThreshold
         // Unique Session ID to bust KV Cache on Local Servers
         val sessionTag = "\n\n[SESSION_ID: $chatId]"
 
+        val currentTimestamp = SimpleDateFormat("EEEE, MMMM d, yyyy 'at' h:mm a", Locale.getDefault()).format(Date())
+
         val fullSystemPrompt = StringBuilder()
             .append(persona.systemInstruction)
             .append(memoryContext)
             .append(relevantConversationContext)
             .append(memoryInstruction)
             .append(sessionTag)
+            .append("\n\n[CURRENT_TIME]: $currentTimestamp")
             .append("\n\n[CONSTRAINTS]: Your response must be concise. Aim for a maximum of approximately $approxWordLimit words.")
             .toString()
 
