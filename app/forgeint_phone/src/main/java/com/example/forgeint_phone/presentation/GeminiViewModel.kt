@@ -43,6 +43,9 @@ import okio.GzipSink
 import okio.GzipSource
 import okio.buffer
 import java.util.concurrent.TimeUnit
+import java.util.Date
+import java.util.Locale
+import java.text.SimpleDateFormat
 import com.example.forgeint.data.ChatDatabase
 import com.example.forgeint.data.Conversation
 import com.example.forgeint.data.Message
@@ -1331,7 +1334,9 @@ fun toggleMemoryMonitor() {
             "\n[KNOWN USER TRAITS]:\n" + traits.joinToString("\n") { "- ${it.category}: ${it.traitValue}" }
         } else ""
 
-        val fullSystemPrompt = persona.systemInstruction + memoryContext + relevantConversationContext
+        val currentTimestamp = SimpleDateFormat("EEEE, MMMM d, yyyy 'at' h:mm a", Locale.getDefault()).format(Date())
+        val fullSystemPrompt = persona.systemInstruction + memoryContext + relevantConversationContext +
+            "\n\n[CURRENT_TIME]: $currentTimestamp"
 
         val maxTokensValue = when (messageLength.value) {
             "Shorter" -> 256
